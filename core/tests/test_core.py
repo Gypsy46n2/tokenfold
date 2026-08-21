@@ -337,3 +337,76 @@ def test_output_metrics_split(tmp_path):
     s = m.summary()
     assert s["orig"] == 100 and s["saved"] == 40                # input side only
     assert s["output"]["generated"] == 50 and s["output"]["saved"] == 30
+
+
+# ------------------------------------------------- imported packs activate
+def test_import_json_mints_a_generation_and_activates_codes():
+    """An imported pack is useless until its codes are generation-frozen:
+    only established codes substitute or ship in a DICT block. Importing
+    must therefore mint; re-importing the same pack must not mint again."""
+    import json as _json
+    d = Dictionary(scope="import-activation-test")
+    from tokenfold.core.seed import seed
+    seed(d)
+    pack = _json.dumps({"aliases": {
+        "K201": {"code": "K201",
+                 "expansion": "always write the changelog entry last",
+                 "surface_forms": [r"always write the changelog entry last"]}}})
+    d.import_json(pack)
+    assert "K201" in d.established_codes(), "imported code must be established"
+    assert any(c == "K201" for _, c in d.substitutable()), "and substitutable"
+    gens = len(d.generations)
+    d.import_json(pack)
+    assert len(d.generations) == gens, "re-import of the same pack must not mint"
+
+
+def test_code_expansion_has_no_substring_collisions():
+    """K1 must never expand inside K101. The verifier judges candidates on
+    their decoded form, so a collision there silently killed every encoding
+    that used a 3+ digit code — and the Decoder must agree byte-for-byte."""
+    import json as _json
+    d = Dictionary(scope="collision-test")
+    from tokenfold.core.seed import seed
+    seed(d)
+    d.import_json(_json.dumps({"aliases": {
+        "K101": {"code": "K101", "expansion": "the hundred-and-first rule",
+                 "surface_forms": [r"the hundred-and-first rule"]}}}))
+    text = "apply K101 and K1 now"
+    expected = "apply the hundred-and-first rule and analyze the program now"
+    assert Decoder(d).decode(text) == expected
+    enc = Encoder(Config(), d)
+    got = enc._expand_codes(text, d.expansions(), Session("collision-s"))
+    assert got == expected, got
+
+
+def test_established_alias_pack_is_not_vetoed_at_face_value():
+    """The candidate decision prices the DICT block at cache-effective cost;
+    the never-larger invariant must judge at the SAME cost, or every alias
+    encoding that wins the decision is vetoed right after (codes then never
+    ship at all). Wire may exceed the original only when a DICT block first
+    ships — the priced-in investment."""
+    import json as _json
+    d = Dictionary(scope="invariant-consistency-test")
+    from tokenfold.core.seed import seed
+    seed(d)
+    sentence = ("Before changing architecture, agent behavior, data stores, "
+                "tool wiring, scheduler flows, or linked-machine behavior, "
+                "read the system map first and update it in the same commit.")
+    d.import_json(_json.dumps({"aliases": {
+        "K150": {"code": "K150", "expansion": sentence,
+                 "surface_forms": [__import__("re").escape(sentence)]}}}))
+    enc = Encoder(Config(), d)
+    sysm = {"role": "system", "content": "Standing rule: " + sentence}
+    history = []
+    shipped_codes = False
+    for turn in range(1, 5):
+        history.append({"role": "user",
+                        "content": f"Turn {turn}: proceed with the refactor step."})
+        msgs = [sysm] + history
+        out, rep = enc.encode(msgs, "gpt-4o", session_id="invariant-s")
+        joined = "\n".join(m.get("content", "") for m in out
+                           if isinstance(m.get("content"), str))
+        if "K150" in joined:
+            shipped_codes = True
+        history.append({"role": "assistant", "content": f"Step {turn} done."})
+    assert shipped_codes, "an established alias never reached the wire"

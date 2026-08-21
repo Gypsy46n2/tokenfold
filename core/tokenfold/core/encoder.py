@@ -273,15 +273,23 @@ class Encoder:
             inject_parts = []
             report.encoded_tokens = total_noalias
             report.dictionary_overhead = 0
+            eff_overhead = 0
         else:
             report.encoded_tokens = total_alias
             report.dictionary_overhead = overhead
             session.last_inject_hash = block_hash
 
-        # ---- absolute invariant: NEVER ship more than the original ------
-        if report.encoded_tokens + report.dictionary_overhead \
+        # ---- invariant: never ship more than the original, judged at the
+        # SAME cache-effective overhead the decision above used. Judging
+        # here at face value while deciding at effective cost made the two
+        # disagree: the alias set won the decision on turn 2+ and was then
+        # vetoed every time, so the documented invest-and-amortize never
+        # started and established aliases were dead weight. The wire may
+        # exceed the original only on the turn a DICT block first ships —
+        # the priced-in investment — never on effective cost.
+        if report.encoded_tokens + eff_overhead \
                 >= report.original_tokens and report.original_tokens:
-            if report.encoded_tokens + report.dictionary_overhead \
+            if report.encoded_tokens + eff_overhead \
                     > report.original_tokens:
                 report.fallback = True
             report.encoded_tokens = report.original_tokens
@@ -450,12 +458,15 @@ class Encoder:
     # ------------------------------------------------------------------
     @staticmethod
     def _expand_codes(text: str, expansions: dict[str, str], session: Session) -> str:
-        out = text
-        for code, exp in expansions.items():
-            out = out.replace(code, exp)
+        # Must expand exactly the way the real Decoder does: whole codes at
+        # word boundaries, one pass. Naive substring replace expanded K1
+        # INSIDE K101, so the verifier judged a corrupted decoded form and
+        # rejected every candidate the moment codes grew past two digits.
+        from .dictionary import _CODE_RE
+        exp = dict(expansions)
         for e in session.entities.values():
-            out = out.replace(e.code, e.name)
-        return out
+            exp.setdefault(e.code, e.name)
+        return _CODE_RE.sub(lambda m: exp.get(m.group(1), m.group(0)), text)
 
     def _codes_used(self, msgs: list[dict]) -> bool:
         from .dictionary import find_codes

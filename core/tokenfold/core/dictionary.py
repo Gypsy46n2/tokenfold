@@ -206,6 +206,20 @@ class Dictionary:
         raw = json.loads(blob)
         for c, a in raw.get("aliases", {}).items():
             self.aliases.setdefault(c, Alias(**a))
+        # Only generation-frozen codes ever substitute or ship in a DICT
+        # block, so an import that never mints never activates — the pack
+        # just sat in the alias table doing nothing. Freeze a new generation
+        # when the import introduced codes outside the active one;
+        # re-importing the same pack finds nothing new and mints nothing.
+        est = self.established_codes()
+        if any(c not in est for c in self.aliases):
+            version = (self.active_generation.version + 1
+                       if self.active_generation else 1)
+            codes = sorted(self.aliases.keys(),
+                           key=lambda c: (c[0], int(c[1:])))
+            self.generations.append(Generation(
+                version=version, codes=codes,
+                bootstrap=self._render_bootstrap(version, codes)))
         self.save()
 
 
