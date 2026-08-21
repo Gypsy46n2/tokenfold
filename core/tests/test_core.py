@@ -410,3 +410,37 @@ def test_established_alias_pack_is_not_vetoed_at_face_value():
             shipped_codes = True
         history.append({"role": "assistant", "content": f"Step {turn} done."})
     assert shipped_codes, "an established alias never reached the wire"
+
+
+def test_digest_never_becomes_a_second_system_message():
+    """Strict chat templates (Qwen3-family) raise 'System message must be at
+    the beginning' for any system message past index 0, and the upstream turns
+    that into a hard 500. The HIST digest must therefore ride INSIDE the
+    leading system message, never as its own."""
+    enc = Encoder(Config(mode="MAX"))
+    sysm = {"role": "system", "content": "You are a terse assistant."}
+    history = []
+    hist_seen = hist_in_head = False
+    for turn in range(1, 6):
+        history.append({"role": "user",
+                        "content": f"Turn {turn}: continue the analysis of the retry helper, "
+                                   "compare the exponential and linear strategies in detail, "
+                                   "and keep the backoff capped at sixty seconds please. "
+                                   "Also restate the acceptance criteria we agreed on so the "
+                                   "reviewer can follow the whole decision without scrolling."})
+        msgs = [sysm] + history
+        out, rep = enc.encode(msgs, "gpt-4o", session_id="strict-template-s")
+        roles = [m.get("role") for m in out]
+        assert roles.count("system") <= 1, f"turn {turn}: {roles}"
+        if "system" in roles:
+            assert roles[0] == "system", f"turn {turn}: system not first: {roles}"
+        for i, m in enumerate(out):
+            if isinstance(m.get("content"), str) and "HIST" in m["content"]:
+                hist_seen = True
+                if i == 0 and m.get("role") == "system":
+                    hist_in_head = True
+        history.append({"role": "assistant", "content": f"Step {turn} done, cap held."})
+    # On turns where folding won, the digest must exist AND live in the system
+    # head. (A turn where the invariant ships the original untouched is fine.)
+    assert hist_seen, "no turn ever produced a digest - folding never engaged"
+    assert hist_in_head, "digest appeared outside the leading system message"

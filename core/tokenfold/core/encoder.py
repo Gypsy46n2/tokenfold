@@ -214,13 +214,18 @@ class Encoder:
         if self.folder and digest_mode:
             # background: squeeze old digest lines with the tiny model
             self.folder.maybe_compact_digest(session, window)
+        # The digest is NOT inserted as its own system message: strict chat
+        # templates (Qwen3-family and others) raise "System message must be at
+        # the beginning" for any system message past index 0, and the upstream
+        # turns that into a hard 500. It is composed into the LEADING system
+        # message at the end of assembly instead — after the byte-stable
+        # DICT/style injections, so the stable prefix stays cacheable and the
+        # per-turn digest is the only part that changes.
+        digest_base = digest_alias = ""
         if digest_mode and digest_lines:
-            base = "HIST (compact digest of earlier turns; ask to expand any "\
-                   "[code:...] ref): " + " | ".join(digest_lines)
-            aliased = self._alias_pass(base, session)
-            pos = 1 if out and out[0].get("role") == "system" else 0
-            out.insert(pos, {"role": "system", "content": aliased})
-            out_noalias.insert(pos, {"role": "system", "content": base})
+            digest_base = "HIST (compact digest of earlier turns; ask to expand any "\
+                          "[code:...] ref): " + " | ".join(digest_lines)
+            digest_alias = self._alias_pass(digest_base, session)
 
         # ---- stable injections (system head) --------------------------
         # The upstream API is stateless: definitions must ride along on EVERY
@@ -231,7 +236,10 @@ class Encoder:
         if cfg.inject_bootstrap:
             from .dictionary import find_codes
             est = self.dict.established_codes()
-            used = [c for m in out for c in find_codes(self._text(m)) if c in est]
+            scan_texts = [self._text(m) for m in out]
+            if digest_alias:
+                scan_texts.append(digest_alias)  # the digest may carry codes too
+            used = [c for t in scan_texts for c in find_codes(t) if c in est]
             # P-bundles are defined by member reference: pull members in too
             for code in list(used):
                 al = self.dict.aliases.get(code)
@@ -246,7 +254,8 @@ class Encoder:
                 if bs:
                     inject_parts.append(bs)
         ent_block = session.entity_block()
-        if ent_block and self._entity_codes_used(out, session):
+        if ent_block and self._entity_codes_used(
+                out + ([{"content": digest_alias}] if digest_alias else []), session):
             inject_parts.append(ent_block)
         block = "\n".join(inject_parts) if inject_parts else ""
         overhead = prof.count(block) if block else 0
@@ -266,18 +275,22 @@ class Encoder:
         # total-cost decision: alias set + injections vs terse-only set.
         # (The terse-style instruction is exempt: it pays for itself in
         # output tokens.)
-        total_alias = sum(prof.count(self._text(m)) for m in out)
-        total_noalias = sum(prof.count(self._text(m)) for m in out_noalias)
+        total_alias = sum(prof.count(self._text(m)) for m in out) \
+            + (prof.count(digest_alias) if digest_alias else 0)
+        total_noalias = sum(prof.count(self._text(m)) for m in out_noalias) \
+            + (prof.count(digest_base) if digest_base else 0)
         if total_noalias <= total_alias + eff_overhead:
             out = out_noalias
             inject_parts = []
             report.encoded_tokens = total_noalias
             report.dictionary_overhead = 0
             eff_overhead = 0
+            digest_text = digest_base
         else:
             report.encoded_tokens = total_alias
             report.dictionary_overhead = overhead
             session.last_inject_hash = block_hash
+            digest_text = digest_alias
 
         # ---- invariant: never ship more than the original, judged at the
         # SAME cache-effective overhead the decision above used. Judging
@@ -296,6 +309,7 @@ class Encoder:
             report.dictionary_overhead = 0
             out = list(messages)
             inject_parts = []
+            digest_text = ""
 
         # style injection: output-side savings, always allowed in human mode
         if cfg.inject_terse_style and cfg.route_mode == "human":
@@ -304,8 +318,14 @@ class Encoder:
                 style += " You may use DICT/ENT codes in replies."
             inject_parts.append(style)
 
-        if inject_parts:
-            block = "\n".join(inject_parts)
+        # One leading system message carries everything: injections first
+        # (byte-stable → prefix-cacheable), then the per-turn digest. Never a
+        # second system message — strict chat templates hard-fail on those.
+        tail_parts = list(inject_parts)
+        if digest_text:
+            tail_parts.append(digest_text)
+        if tail_parts:
+            block = "\n".join(tail_parts)
             if out and out[0].get("role") == "system" and isinstance(out[0].get("content"), str):
                 out[0] = {**out[0], "content": out[0]["content"] + "\n\n" + block}
             else:
