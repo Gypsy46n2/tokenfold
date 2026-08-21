@@ -237,7 +237,15 @@ def add_anthropic_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -
                 msgs.append({"role": m.get("role"), "content": c})
             else:
                 msgs.append(m)  # tool blocks etc.: untouched
-        encoded, report = eng.encode(msgs, model)
+        # Bug (found scanning the repo for more agent-manager blockers, 2026-08-21): this
+        # was the only route (of /v1/chat/completions, /api/chat, /api/generate) that
+        # never passed session_id through to encode() -- every request landed on a
+        # fresh, one-off, content-derived session no matter what the caller sent in
+        # X-TokenFold-Session, so this route could never get the session-continuity
+        # benefit at all. Not yet observed live against this route in practice; caught by
+        # code inspection, matching the same header every sibling route already reads.
+        sid_hdr = request.headers.get("x-tokenfold-session")
+        encoded, report = eng.encode(msgs, model, session_id=sid_hdr)
         new_sys = None
         out_msgs = []
         for m in encoded:

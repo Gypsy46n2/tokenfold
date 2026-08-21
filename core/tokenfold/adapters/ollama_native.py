@@ -95,6 +95,32 @@ def add_ollama_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -> N
         try:
             obj = r.json()
             msg = obj.get("message") or {}
+            raw0 = msg.get("content")
+            # Bug (found scanning the repo for more agent-manager blockers, 2026-08-21):
+            # the non-streaming /v1/chat/completions route (proxy.py) auto-detects the
+            # model asking to see a folded [ref:...]/[code:...] placeholder and retries
+            # once with the real content injected; this route (and /api/generate below)
+            # never did, despite sharing the exact same folding mechanism -- only their
+            # STREAMING sibling (_stream_ndjson) called expansion_requests at all. A model
+            # response asking to expand a fold would ship as-is here instead of getting
+            # the automatic re-answer proxy.py gives OpenAI-API callers.
+            if isinstance(raw0, str):
+                asks = eng.expansion_requests(raw0, sid)
+                if asks:
+                    supplement = "\n\n".join(
+                        f"[expanded {h}]\n{orig}" for h, orig in asks[:3])
+                    retry = dict(body)
+                    retry["messages"] = list(body["messages"]) + [
+                        {"role": "assistant", "content": raw0},
+                        {"role": "user", "content":
+                         "Expanded content you requested:\n" + supplement +
+                         "\n\nNow answer the previous question."}]
+                    r2 = await client.post(upstream, json=retry, headers=headers)
+                    try:
+                        obj = r2.json()
+                    except Exception:
+                        pass
+            msg = obj.get("message") or {}
             if isinstance(msg.get("content"), str):
                 raw_txt = msg["content"]
                 msg["content"] = eng.decode(raw_txt, sid)
@@ -149,6 +175,27 @@ def add_ollama_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -> N
         r = await client.post(upstream, json=body, headers=headers)
         try:
             obj = r.json()
+            raw0 = obj.get("response")
+            # See ollama_chat's identical fix just above for why this is needed: only
+            # the streaming path called expansion_requests before. /api/generate has no
+            # message list to append a follow-up turn to (single `prompt` string), so
+            # the retry appends the expansion request directly onto the original prompt
+            # instead of proxy.py's/ollama_chat's synthetic assistant+user turn pair.
+            if isinstance(raw0, str):
+                asks = eng.expansion_requests(raw0, sid)
+                if asks:
+                    supplement = "\n\n".join(
+                        f"[expanded {h}]\n{orig}" for h, orig in asks[:3])
+                    retry = dict(body)
+                    retry["prompt"] = (
+                        body.get("prompt", "") + "\n\n" + raw0 +
+                        "\n\nExpanded content you requested:\n" + supplement +
+                        "\n\nNow answer the previous question.")
+                    r2 = await client.post(upstream, json=retry, headers=headers)
+                    try:
+                        obj = r2.json()
+                    except Exception:
+                        pass
             if isinstance(obj.get("response"), str):
                 raw_txt = obj["response"]
                 obj["response"] = eng.decode(raw_txt, sid)
