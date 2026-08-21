@@ -1,0 +1,5 @@
+{
+  "name": "tokenfold",
+  "version": "0.1.0",
+  "description": "Token-compression middleware: compress subagent prompts and injected context via the local TokenFold engine"
+}

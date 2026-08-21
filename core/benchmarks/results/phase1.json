@@ -1,0 +1,622 @@
+{
+ "bootstrap_tokens": {
+  "o200k": 129,
+  "cl100k": 126,
+  "claude-est": 134,
+  "qwen2.5": 128,
+  "llama3": 126,
+  "deepseek3": 126,
+  "mistral": 137,
+  "gemma2": 128
+ },
+ "items": [
+  {
+   "id": "code_review",
+   "category": "coding",
+   "counts": {
+    "raw_en": {
+     "o200k": 37,
+     "cl100k": 37,
+     "claude-est": 56,
+     "qwen2.5": 37,
+     "llama3": 37,
+     "deepseek3": 37,
+     "mistral": 37,
+     "gemma2": 37
+    },
+    "concise_en": {
+     "o200k": 19,
+     "cl100k": 20,
+     "claude-est": 31,
+     "qwen2.5": 20,
+     "llama3": 20,
+     "deepseek3": 20,
+     "mistral": 21,
+     "gemma2": 19
+    },
+    "terse_en": {
+     "o200k": 15,
+     "cl100k": 15,
+     "claude-est": 17,
+     "qwen2.5": 15,
+     "llama3": 15,
+     "deepseek3": 15,
+     "mistral": 15,
+     "gemma2": 15
+    },
+    "raw_zh": {
+     "o200k": 37,
+     "cl100k": 45,
+     "claude-est": 51,
+     "qwen2.5": 29,
+     "llama3": 39,
+     "deepseek3": 27,
+     "mistral": 51,
+     "gemma2": 30
+    },
+    "concise_zh": {
+     "o200k": 25,
+     "cl100k": 28,
+     "claude-est": 32,
+     "qwen2.5": 20,
+     "llama3": 26,
+     "deepseek3": 20,
+     "mistral": 33,
+     "gemma2": 21
+    },
+    "foldlang_sym": {
+     "o200k": 14,
+     "cl100k": 14,
+     "claude-est": 13,
+     "qwen2.5": 14,
+     "llama3": 14,
+     "deepseek3": 16,
+     "mistral": 16,
+     "gemma2": 15
+    },
+    "foldlang_alias": {
+     "o200k": 12,
+     "cl100k": 12,
+     "claude-est": 10,
+     "qwen2.5": 12,
+     "llama3": 12,
+     "deepseek3": 12,
+     "mistral": 12,
+     "gemma2": 12
+    }
+   }
+  },
+  {
+   "id": "agent_guard",
+   "category": "agent_instruction",
+   "counts": {
+    "raw_en": {
+     "o200k": 48,
+     "cl100k": 48,
+     "claude-est": 74,
+     "qwen2.5": 48,
+     "llama3": 48,
+     "deepseek3": 48,
+     "mistral": 50,
+     "gemma2": 48
+    },
+    "concise_en": {
+     "o200k": 28,
+     "cl100k": 28,
+     "claude-est": 43,
+     "qwen2.5": 28,
+     "llama3": 28,
+     "deepseek3": 28,
+     "mistral": 31,
+     "gemma2": 28
+    },
+    "terse_en": {
+     "o200k": 19,
+     "cl100k": 19,
+     "claude-est": 24,
+     "qwen2.5": 19,
+     "llama3": 19,
+     "deepseek3": 19,
+     "mistral": 21,
+     "gemma2": 18
+    },
+    "raw_zh": {
+     "o200k": 49,
+     "cl100k": 69,
+     "claude-est": 73,
+     "qwen2.5": 41,
+     "llama3": 50,
+     "deepseek3": 38,
+     "mistral": 74,
+     "gemma2": 42
+    },
+    "concise_zh": {
+     "o200k": 29,
+     "cl100k": 41,
+     "claude-est": 42,
+     "qwen2.5": 24,
+     "llama3": 29,
+     "deepseek3": 24,
+     "mistral": 45,
+     "gemma2": 24
+    },
+    "foldlang_sym": {
+     "o200k": 17,
+     "cl100k": 17,
+     "claude-est": 16,
+     "qwen2.5": 17,
+     "llama3": 17,
+     "deepseek3": 17,
+     "mistral": 19,
+     "gemma2": 18
+    },
+    "foldlang_alias": {
+     "o200k": 10,
+     "cl100k": 10,
+     "claude-est": 4,
+     "qwen2.5": 10,
+     "llama3": 10,
+     "deepseek3": 10,
+     "mistral": 10,
+     "gemma2": 10
+    }
+   }
+  },
+  {
+   "id": "research",
+   "category": "research",
+   "counts": {
+    "raw_en": {
+     "o200k": 51,
+     "cl100k": 51,
+     "claude-est": 79,
+     "qwen2.5": 51,
+     "llama3": 51,
+     "deepseek3": 51,
+     "mistral": 57,
+     "gemma2": 52
+    },
+    "concise_en": {
+     "o200k": 34,
+     "cl100k": 34,
+     "claude-est": 50,
+     "qwen2.5": 34,
+     "llama3": 34,
+     "deepseek3": 34,
+     "mistral": 43,
+     "gemma2": 38
+    },
+    "terse_en": {
+     "o200k": 22,
+     "cl100k": 22,
+     "claude-est": 27,
+     "qwen2.5": 22,
+     "llama3": 22,
+     "deepseek3": 22,
+     "mistral": 26,
+     "gemma2": 22
+    },
+    "raw_zh": {
+     "o200k": 47,
+     "cl100k": 82,
+     "claude-est": 73,
+     "qwen2.5": 39,
+     "llama3": 51,
+     "deepseek3": 36,
+     "mistral": 73,
+     "gemma2": 40
+    },
+    "concise_zh": {
+     "o200k": 33,
+     "cl100k": 51,
+     "claude-est": 41,
+     "qwen2.5": 29,
+     "llama3": 36,
+     "deepseek3": 27,
+     "mistral": 47,
+     "gemma2": 29
+    },
+    "foldlang_sym": {
+     "o200k": 20,
+     "cl100k": 20,
+     "claude-est": 17,
+     "qwen2.5": 20,
+     "llama3": 20,
+     "deepseek3": 21,
+     "mistral": 22,
+     "gemma2": 21
+    },
+    "foldlang_alias": {
+     "o200k": 13,
+     "cl100k": 13,
+     "claude-est": 8,
+     "qwen2.5": 13,
+     "llama3": 13,
+     "deepseek3": 13,
+     "mistral": 13,
+     "gemma2": 13
+    }
+   }
+  },
+  {
+   "id": "conversational",
+   "category": "conversational",
+   "counts": {
+    "raw_en": {
+     "o200k": 39,
+     "cl100k": 39,
+     "claude-est": 55,
+     "qwen2.5": 39,
+     "llama3": 39,
+     "deepseek3": 39,
+     "mistral": 40,
+     "gemma2": 39
+    },
+    "concise_en": {
+     "o200k": 22,
+     "cl100k": 22,
+     "claude-est": 28,
+     "qwen2.5": 22,
+     "llama3": 22,
+     "deepseek3": 22,
+     "mistral": 23,
+     "gemma2": 22
+    },
+    "terse_en": {
+     "o200k": 12,
+     "cl100k": 12,
+     "claude-est": 14,
+     "qwen2.5": 12,
+     "llama3": 12,
+     "deepseek3": 12,
+     "mistral": 14,
+     "gemma2": 12
+    },
+    "raw_zh": {
+     "o200k": 43,
+     "cl100k": 74,
+     "claude-est": 63,
+     "qwen2.5": 34,
+     "llama3": 47,
+     "deepseek3": 31,
+     "mistral": 69,
+     "gemma2": 34
+    },
+    "concise_zh": {
+     "o200k": 18,
+     "cl100k": 37,
+     "claude-est": 29,
+     "qwen2.5": 15,
+     "llama3": 22,
+     "deepseek3": 15,
+     "mistral": 29,
+     "gemma2": 16
+    },
+    "foldlang_sym": {
+     "o200k": 13,
+     "cl100k": 13,
+     "claude-est": 8,
+     "qwen2.5": 13,
+     "llama3": 13,
+     "deepseek3": 13,
+     "mistral": 14,
+     "gemma2": 12
+    },
+    "foldlang_alias": {
+     "o200k": 13,
+     "cl100k": 13,
+     "claude-est": 8,
+     "qwen2.5": 13,
+     "llama3": 13,
+     "deepseek3": 13,
+     "mistral": 14,
+     "gemma2": 12
+    }
+   }
+  },
+  {
+   "id": "long_technical",
+   "category": "long_technical",
+   "counts": {
+    "raw_en": {
+     "o200k": 119,
+     "cl100k": 117,
+     "claude-est": 180,
+     "qwen2.5": 117,
+     "llama3": 117,
+     "deepseek3": 119,
+     "mistral": 131,
+     "gemma2": 120
+    },
+    "concise_en": {
+     "o200k": 79,
+     "cl100k": 78,
+     "claude-est": 119,
+     "qwen2.5": 78,
+     "llama3": 78,
+     "deepseek3": 79,
+     "mistral": 94,
+     "gemma2": 78
+    },
+    "terse_en": {
+     "o200k": 62,
+     "cl100k": 63,
+     "claude-est": 76,
+     "qwen2.5": 63,
+     "llama3": 63,
+     "deepseek3": 65,
+     "mistral": 74,
+     "gemma2": 63
+    },
+    "raw_zh": {
+     "o200k": 133,
+     "cl100k": 179,
+     "claude-est": 176,
+     "qwen2.5": 110,
+     "llama3": 135,
+     "deepseek3": 104,
+     "mistral": 183,
+     "gemma2": 109
+    },
+    "concise_zh": {
+     "o200k": 96,
+     "cl100k": 128,
+     "claude-est": 115,
+     "qwen2.5": 79,
+     "llama3": 100,
+     "deepseek3": 78,
+     "mistral": 130,
+     "gemma2": 78
+    },
+    "foldlang_sym": {
+     "o200k": 62,
+     "cl100k": 61,
+     "claude-est": 51,
+     "qwen2.5": 61,
+     "llama3": 61,
+     "deepseek3": 63,
+     "mistral": 68,
+     "gemma2": 62
+    },
+    "foldlang_alias": {
+     "o200k": 48,
+     "cl100k": 47,
+     "claude-est": 41,
+     "qwen2.5": 47,
+     "llama3": 47,
+     "deepseek3": 49,
+     "mistral": 53,
+     "gemma2": 48
+    }
+   }
+  },
+  {
+   "id": "tool_call",
+   "category": "tool_call",
+   "counts": {
+    "raw_en": {
+     "o200k": 36,
+     "cl100k": 36,
+     "claude-est": 57,
+     "qwen2.5": 36,
+     "llama3": 36,
+     "deepseek3": 36,
+     "mistral": 37,
+     "gemma2": 37
+    },
+    "concise_en": {
+     "o200k": 20,
+     "cl100k": 20,
+     "claude-est": 31,
+     "qwen2.5": 20,
+     "llama3": 20,
+     "deepseek3": 20,
+     "mistral": 21,
+     "gemma2": 21
+    },
+    "terse_en": {
+     "o200k": 14,
+     "cl100k": 14,
+     "claude-est": 17,
+     "qwen2.5": 14,
+     "llama3": 14,
+     "deepseek3": 14,
+     "mistral": 15,
+     "gemma2": 15
+    },
+    "raw_zh": {
+     "o200k": 30,
+     "cl100k": 37,
+     "claude-est": 51,
+     "qwen2.5": 30,
+     "llama3": 30,
+     "deepseek3": 24,
+     "mistral": 48,
+     "gemma2": 27
+    },
+    "concise_zh": {
+     "o200k": 20,
+     "cl100k": 22,
+     "claude-est": 33,
+     "qwen2.5": 20,
+     "llama3": 20,
+     "deepseek3": 18,
+     "mistral": 32,
+     "gemma2": 19
+    },
+    "foldlang_sym": {
+     "o200k": 14,
+     "cl100k": 13,
+     "claude-est": 14,
+     "qwen2.5": 13,
+     "llama3": 13,
+     "deepseek3": 16,
+     "mistral": 17,
+     "gemma2": 15
+    },
+    "foldlang_alias": {
+     "o200k": 6,
+     "cl100k": 6,
+     "claude-est": 6,
+     "qwen2.5": 8,
+     "llama3": 6,
+     "deepseek3": 6,
+     "mistral": 9,
+     "gemma2": 9
+    }
+   }
+  },
+  {
+   "id": "multi_agent",
+   "category": "multi_agent",
+   "counts": {
+    "raw_en": {
+     "o200k": 61,
+     "cl100k": 61,
+     "claude-est": 84,
+     "qwen2.5": 61,
+     "llama3": 61,
+     "deepseek3": 61,
+     "mistral": 64,
+     "gemma2": 61
+    },
+    "concise_en": {
+     "o200k": 33,
+     "cl100k": 33,
+     "claude-est": 45,
+     "qwen2.5": 33,
+     "llama3": 33,
+     "deepseek3": 33,
+     "mistral": 38,
+     "gemma2": 35
+    },
+    "terse_en": {
+     "o200k": 23,
+     "cl100k": 23,
+     "claude-est": 21,
+     "qwen2.5": 23,
+     "llama3": 23,
+     "deepseek3": 23,
+     "mistral": 25,
+     "gemma2": 24
+    },
+    "raw_zh": {
+     "o200k": 55,
+     "cl100k": 71,
+     "claude-est": 77,
+     "qwen2.5": 52,
+     "llama3": 58,
+     "deepseek3": 49,
+     "mistral": 78,
+     "gemma2": 52
+    },
+    "concise_zh": {
+     "o200k": 39,
+     "cl100k": 51,
+     "claude-est": 47,
+     "qwen2.5": 37,
+     "llama3": 42,
+     "deepseek3": 35,
+     "mistral": 53,
+     "gemma2": 38
+    },
+    "foldlang_sym": {
+     "o200k": 20,
+     "cl100k": 21,
+     "claude-est": 17,
+     "qwen2.5": 21,
+     "llama3": 21,
+     "deepseek3": 20,
+     "mistral": 24,
+     "gemma2": 21
+    },
+    "foldlang_alias": {
+     "o200k": 18,
+     "cl100k": 19,
+     "claude-est": 13,
+     "qwen2.5": 19,
+     "llama3": 19,
+     "deepseek3": 18,
+     "mistral": 22,
+     "gemma2": 19
+    }
+   }
+  },
+  {
+   "id": "repeated_boilerplate",
+   "category": "repeated_instruction",
+   "counts": {
+    "raw_en": {
+     "o200k": 47,
+     "cl100k": 47,
+     "claude-est": 78,
+     "qwen2.5": 47,
+     "llama3": 47,
+     "deepseek3": 47,
+     "mistral": 49,
+     "gemma2": 47
+    },
+    "concise_en": {
+     "o200k": 29,
+     "cl100k": 30,
+     "claude-est": 50,
+     "qwen2.5": 30,
+     "llama3": 30,
+     "deepseek3": 31,
+     "mistral": 35,
+     "gemma2": 31
+    },
+    "terse_en": {
+     "o200k": 19,
+     "cl100k": 19,
+     "claude-est": 21,
+     "qwen2.5": 19,
+     "llama3": 19,
+     "deepseek3": 19,
+     "mistral": 23,
+     "gemma2": 19
+    },
+    "raw_zh": {
+     "o200k": 50,
+     "cl100k": 65,
+     "claude-est": 68,
+     "qwen2.5": 38,
+     "llama3": 51,
+     "deepseek3": 38,
+     "mistral": 70,
+     "gemma2": 42
+    },
+    "concise_zh": {
+     "o200k": 36,
+     "cl100k": 47,
+     "claude-est": 47,
+     "qwen2.5": 29,
+     "llama3": 37,
+     "deepseek3": 29,
+     "mistral": 50,
+     "gemma2": 30
+    },
+    "foldlang_sym": {
+     "o200k": 16,
+     "cl100k": 16,
+     "claude-est": 15,
+     "qwen2.5": 16,
+     "llama3": 16,
+     "deepseek3": 18,
+     "mistral": 19,
+     "gemma2": 19
+    },
+    "foldlang_alias": {
+     "o200k": 2,
+     "cl100k": 2,
+     "claude-est": 1,
+     "qwen2.5": 2,
+     "llama3": 2,
+     "deepseek3": 2,
+     "mistral": 2,
+     "gemma2": 2
+    }
+   }
+  }
+ ]
+}

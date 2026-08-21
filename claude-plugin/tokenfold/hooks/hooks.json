@@ -1,0 +1,16 @@
+{
+  "description": "Optional: log token estimates for Task prompts via TokenFold (passthrough-safe).",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Task|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m tokenfold.hook_pretool"
+          }
+        ]
+      }
+    ]
+  }
+}

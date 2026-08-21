@@ -1,0 +1,16 @@
+[project]
+name = "tokenfold"
+version = "0.1.0"
+description = "Transparent token-compression middleware for LLM communication"
+requires-python = ">=3.11"
+dependencies = ["tiktoken", "tokenizers", "httpx", "fastapi", "uvicorn"]
+
+[project.scripts]
+tokenfold = "tokenfold.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["tokenfold*"]

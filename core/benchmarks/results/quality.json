@@ -1,0 +1,98 @@
+{
+ "OFF": {
+  "fact_memory": {
+   "pass": true,
+   "checks": [
+    true,
+    true
+   ],
+   "answer_tail": "The remaining budget is **$6,300**.  \nDeadline: **2026-11-15**."
+  },
+  "constraint_memory": {
+   "pass": true,
+   "checks": [
+    true
+   ],
+   "answer_tail": "The single file that must never be modified is **config.yaml**."
+  },
+  "code_name_memory": {
+   "pass": true,
+   "checks": [
+    true
+   ],
+   "answer_tail": "The exact name of the function you sent earlier is **`calc_backoff_v3`**. \n\nIf you need to reference it again, you can expand the code reference by re-sharing the function definition. Let me know if you'd like further analysis!"
+  },
+  "decision_memory": {
+   "pass": true,
+   "checks": [
+    true,
+    true
+   ],
+   "answer_tail": "PostgreSQL 16 and pgbouncer."
+  },
+  "alias_comprehension": {
+   "pass": true,
+   "checks": [
+    true,
+    true,
+    true
+   ],
+   "answer_tail": "changes with the test suite.  \n- **Preserve all public APIs**: Maintain backward compatibility for external integrations.  \n- **Update documentation when behavior changes**: Reflect API/behavior updates in docs.  \n- **Never modify unrelated files**: Focus only on files directly impacted by the task."
+  },
+  "sanity_arith": {
+   "pass": true,
+   "checks": [
+    true
+   ],
+   "answer_tail": "391"
+  }
+ },
+ "MAX": {
+  "fact_memory": {
+   "pass": true,
+   "checks": [
+    true,
+    true
+   ],
+   "answer_tail": "Remaining budget: $6,300. Deadline: 2026-11-15."
+  },
+  "constraint_memory": {
+   "pass": true,
+   "checks": [
+    true
+   ],
+   "answer_tail": "config.yaml"
+  },
+  "code_name_memory": {
+   "pass": true,
+   "checks": [
+    true
+   ],
+   "answer_tail": "The exact name of the function is `calc_backoff_v3`."
+  },
+  "decision_memory": {
+   "pass": true,
+   "checks": [
+    true,
+    true
+   ],
+   "answer_tail": "PostgreSQL 16, pgbouncer."
+  },
+  "alias_comprehension": {
+   "pass": true,
+   "checks": [
+    true,
+    true,
+    true
+   ],
+   "answer_tail": "- Do not break existing functionality  \n- Run tests before finishing  \n- Preserve all public APIs  \n- Update documentation on behavior changes  \n- Never modify unrelated files"
+  },
+  "sanity_arith": {
+   "pass": true,
+   "checks": [
+    true
+   ],
+   "answer_tail": "391"
+  }
+ }
+}

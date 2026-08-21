@@ -1,0 +1,274 @@
+{
+ "gpt-4o/BALANCED": [
+  {
+   "turn": 1,
+   "original": 526,
+   "encoded": 526,
+   "effective": 526,
+   "saved": 0,
+   "pct": 0.0,
+   "eff_pct": 0.0,
+   "fallback": false,
+   "latency_ms": 7.1
+  },
+  {
+   "turn": 2,
+   "original": 1434,
+   "encoded": 1034,
+   "effective": 952,
+   "saved": 400,
+   "pct": 27.9,
+   "eff_pct": 33.6,
+   "fallback": false,
+   "latency_ms": 10.6
+  },
+  {
+   "turn": 3,
+   "original": 1891,
+   "encoded": 639,
+   "effective": 557,
+   "saved": 1252,
+   "pct": 66.2,
+   "eff_pct": 70.5,
+   "fallback": false,
+   "latency_ms": 10.3
+  },
+  {
+   "turn": 4,
+   "original": 1984,
+   "encoded": 313,
+   "effective": 231,
+   "saved": 1671,
+   "pct": 84.2,
+   "eff_pct": 88.4,
+   "fallback": false,
+   "latency_ms": 5.5
+  },
+  {
+   "turn": 5,
+   "original": 2065,
+   "encoded": 351,
+   "effective": 269,
+   "saved": 1714,
+   "pct": 83.0,
+   "eff_pct": 87.0,
+   "fallback": false,
+   "latency_ms": 5.6
+  },
+  {
+   "turn": 6,
+   "original": 2147,
+   "encoded": 394,
+   "effective": 312,
+   "saved": 1753,
+   "pct": 81.6,
+   "eff_pct": 85.5,
+   "fallback": false,
+   "latency_ms": 5.3
+  }
+ ],
+ "gpt-4o/MAX": [
+  {
+   "turn": 1,
+   "original": 526,
+   "encoded": 526,
+   "effective": 526,
+   "saved": 0,
+   "pct": 0.0,
+   "eff_pct": 0.0,
+   "fallback": false,
+   "latency_ms": 4.5
+  },
+  {
+   "turn": 2,
+   "original": 1434,
+   "encoded": 684,
+   "effective": 602,
+   "saved": 750,
+   "pct": 52.3,
+   "eff_pct": 58.0,
+   "fallback": false,
+   "latency_ms": 5.7
+  },
+  {
+   "turn": 3,
+   "original": 1891,
+   "encoded": 253,
+   "effective": 171,
+   "saved": 1638,
+   "pct": 86.6,
+   "eff_pct": 91.0,
+   "fallback": false,
+   "latency_ms": 4.6
+  },
+  {
+   "turn": 4,
+   "original": 1984,
+   "encoded": 317,
+   "effective": 235,
+   "saved": 1667,
+   "pct": 84.0,
+   "eff_pct": 88.2,
+   "fallback": false,
+   "latency_ms": 4.9
+  },
+  {
+   "turn": 5,
+   "original": 2065,
+   "encoded": 355,
+   "effective": 273,
+   "saved": 1710,
+   "pct": 82.8,
+   "eff_pct": 86.8,
+   "fallback": false,
+   "latency_ms": 4.9
+  },
+  {
+   "turn": 6,
+   "original": 2147,
+   "encoded": 398,
+   "effective": 316,
+   "saved": 1749,
+   "pct": 81.5,
+   "eff_pct": 85.3,
+   "fallback": false,
+   "latency_ms": 4.9
+  }
+ ],
+ "qwen2.5:0.5b/BALANCED": [
+  {
+   "turn": 1,
+   "original": 566,
+   "encoded": 566,
+   "effective": 566,
+   "saved": 0,
+   "pct": 0.0,
+   "eff_pct": 0.0,
+   "fallback": false,
+   "latency_ms": 10.3
+  },
+  {
+   "turn": 2,
+   "original": 1530,
+   "encoded": 1093,
+   "effective": 1012,
+   "saved": 437,
+   "pct": 28.6,
+   "eff_pct": 33.9,
+   "fallback": false,
+   "latency_ms": 20.6
+  },
+  {
+   "turn": 3,
+   "original": 2003,
+   "encoded": 659,
+   "effective": 578,
+   "saved": 1344,
+   "pct": 67.1,
+   "eff_pct": 71.1,
+   "fallback": false,
+   "latency_ms": 17.8
+  },
+  {
+   "turn": 4,
+   "original": 2096,
+   "encoded": 317,
+   "effective": 236,
+   "saved": 1779,
+   "pct": 84.9,
+   "eff_pct": 88.7,
+   "fallback": false,
+   "latency_ms": 10.9
+  },
+  {
+   "turn": 5,
+   "original": 2177,
+   "encoded": 355,
+   "effective": 274,
+   "saved": 1822,
+   "pct": 83.7,
+   "eff_pct": 87.4,
+   "fallback": false,
+   "latency_ms": 10.6
+  },
+  {
+   "turn": 6,
+   "original": 2261,
+   "encoded": 400,
+   "effective": 319,
+   "saved": 1861,
+   "pct": 82.3,
+   "eff_pct": 85.9,
+   "fallback": false,
+   "latency_ms": 10.3
+  }
+ ],
+ "qwen2.5:0.5b/MAX": [
+  {
+   "turn": 1,
+   "original": 566,
+   "encoded": 566,
+   "effective": 566,
+   "saved": 0,
+   "pct": 0.0,
+   "eff_pct": 0.0,
+   "fallback": false,
+   "latency_ms": 9.6
+  },
+  {
+   "turn": 2,
+   "original": 1530,
+   "encoded": 728,
+   "effective": 647,
+   "saved": 802,
+   "pct": 52.4,
+   "eff_pct": 57.7,
+   "fallback": false,
+   "latency_ms": 12.6
+  },
+  {
+   "turn": 3,
+   "original": 2003,
+   "encoded": 257,
+   "effective": 176,
+   "saved": 1746,
+   "pct": 87.2,
+   "eff_pct": 91.2,
+   "fallback": false,
+   "latency_ms": 9.3
+  },
+  {
+   "turn": 4,
+   "original": 2096,
+   "encoded": 321,
+   "effective": 240,
+   "saved": 1775,
+   "pct": 84.7,
+   "eff_pct": 88.5,
+   "fallback": false,
+   "latency_ms": 10.1
+  },
+  {
+   "turn": 5,
+   "original": 2177,
+   "encoded": 359,
+   "effective": 278,
+   "saved": 1818,
+   "pct": 83.5,
+   "eff_pct": 87.2,
+   "fallback": false,
+   "latency_ms": 10.7
+  },
+  {
+   "turn": 6,
+   "original": 2261,
+   "encoded": 405,
+   "effective": 324,
+   "saved": 1856,
+   "pct": 82.1,
+   "eff_pct": 85.7,
+   "fallback": false,
+   "latency_ms": 10.4
+  }
+ ]
+}
