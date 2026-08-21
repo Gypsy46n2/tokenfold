@@ -200,6 +200,8 @@ padding:.3rem .7rem;text-align:left}}h1{{font-size:1.3rem}}
         return ("data: " + json.dumps(obj) + "\n\n").encode()
 
     add_anthropic_routes(app, eng, client)
+    from .ollama_native import add_ollama_routes
+    add_ollama_routes(app, eng, client)
     return app
 
 
