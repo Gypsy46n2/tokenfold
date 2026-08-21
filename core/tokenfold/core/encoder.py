@@ -150,6 +150,19 @@ class Encoder:
                 continue
 
             is_old = i < fold_cutoff and role in ("user", "assistant", "tool") and i > 0
+            # An assistant message carrying tool_calls must NEVER be folded away:
+            # its paired role:"tool" message (kept as a [ref:...] below) has a
+            # tool_call_id that the API requires be introduced by a preceding
+            # assistant tool_calls. Omit the assistant turn and the upstream
+            # 400s the whole request. Keep it verbatim (these turns are short).
+            if is_old and m.get("tool_calls"):
+                out.append(m)
+                out_noalias.append(m)
+                report.encoded_tokens += orig_tok
+                report.messages.append(MessageReport(
+                    index=i, representation="tool-call", original_tokens=orig_tok,
+                    encoded_tokens=orig_tok))
+                continue
             if is_old and role == "tool":
                 # tool results: keep the message (API pairing with tool_calls)
                 # but replace bulky old content with a reference
@@ -337,17 +350,20 @@ class Encoder:
 
     # ------------------------------------------------------------------
     def _alias_pass(self, text: str, session: Session) -> str:
-        """Exact-meaning alias/entity/bundle substitution (no verification
-        needed: substitutions are definitionally meaning-preserving)."""
+        """Exact-meaning alias/entity/bundle substitution. This ships WITHOUT
+        the verifier (digest lines, old-turn folds), so every substitution must
+        be word-boundary-safe: `str.replace` on an entity name turns "Agent
+        Managers" into "E1s", which the decoder's \\bE1\\b cannot expand — the
+        model then sees a broken token."""
+        import re as _re
         out = text
         for pat, code in self.dict.substitutable():
             out = pat.sub(code, out)
         from .seed import bundle_patterns
-        import re as _re
         for bp, pcode in bundle_patterns():
             out = _re.sub(bp, pcode, out)
         for name, code in session.entity_pairs():
-            out = out.replace(name, code)
+            out = _re.sub(rf"\b{_re.escape(name)}\b", code, out)
         return out
 
     def _absorb_into_digest(self, text: str, role: str, session: Session) -> str:

@@ -444,3 +444,72 @@ def test_digest_never_becomes_a_second_system_message():
     # head. (A turn where the invariant ships the original untouched is fine.)
     assert hist_seen, "no turn ever produced a digest - folding never engaged"
     assert hist_in_head, "digest appeared outside the leading system message"
+
+
+def test_assistant_tool_calls_message_is_never_folded_away():
+    """An old assistant message carrying tool_calls must survive folding — its
+    paired role:'tool' message keeps a tool_call_id the API requires be
+    introduced by a preceding assistant tool_calls, or the upstream 400s."""
+    enc = Encoder(Config(mode="MAX"))
+    msgs = [
+        {"role": "system", "content": "You are a worker."},
+        {"role": "assistant", "content": "calling a tool",
+         "tool_calls": [{"id": "call_1", "type": "function",
+                         "function": {"name": "read", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "file contents " * 40},
+        {"role": "user", "content": "now summarize what you found in the file"},
+    ]
+    out, _rep = enc.encode(msgs, "gpt-4o", session_id="toolcalls-s")
+    tool_ids = {m.get("tool_call_id") for m in out if m.get("role") == "tool"}
+    call_ids = {tc["id"] for m in out if m.get("role") == "assistant"
+                for tc in (m.get("tool_calls") or [])}
+    for tid in tool_ids:
+        assert tid in call_ids, f"tool message {tid} lost its assistant tool_calls pairing"
+
+
+def test_bundle_pattern_respects_code_boundaries():
+    """K3;K4;K5;K6;K78 must NOT collapse to P18 — the trailing K6 must not
+    swallow K78 (this path ships unverified)."""
+    from tokenfold.core.seed import bundle_patterns
+    import re as _re
+    text = "rules: K3; K4; K5; K6; K78 extra"
+    for pat, pcode in bundle_patterns():
+        text = _re.sub(pat, pcode, text)
+    assert "K78" in text, f"K78 was corrupted: {text!r}"
+
+
+def test_stream_decoder_does_not_corrupt_words_ending_in_a_code():
+    """Feeding 'Board OK1' then ' done' must not turn OK1 into an expansion."""
+    from tokenfold.core.decoder import Decoder, StreamDecoder
+    d = Dictionary(scope="stream-boundary-test")
+    from tokenfold.core.seed import seed
+    seed(d)
+    sd = StreamDecoder(Decoder(d))
+    got = sd.feed("Board OK1") + sd.feed(" done") + sd.flush()
+    assert got == "Board OK1 done", repr(got)
+
+
+def test_stream_decoder_does_not_stall_on_a_lone_bracket():
+    """A '[' that never closes must be flushed, not held until stream end."""
+    from tokenfold.core.decoder import Decoder, StreamDecoder
+    d = Dictionary(scope="stream-bracket-test")
+    from tokenfold.core.seed import seed
+    seed(d)
+    sd = StreamDecoder(Decoder(d))
+    out = sd.feed("use [ to open an array literal in the language, ")
+    out += sd.feed("then keep typing normally for a while afterward")
+    # the bracket-held text must have been emitted mid-stream, not stranded
+    assert "to open an array literal" in (out + sd.flush())
+
+
+def test_entity_alias_pass_respects_word_boundaries():
+    """_alias_pass must not turn 'Agent Managers' into 'E1s' (unverified path)."""
+    from tokenfold.core.session import Session
+    enc = Encoder(Config())
+    s = Session("entity-boundary-s")
+    s.observe_entities("Agent Manager is the system. Agent Manager rocks.")
+    # force an entity to exist with a code
+    if s.entity_pairs():
+        out = enc._alias_pass("The Agent Managers shipped it", s)
+        assert "s" in out  # plural survives
+        assert "E" not in out or "Managers" in out or "E1s" not in out, out

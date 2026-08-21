@@ -163,36 +163,64 @@ def add_ollama_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -> N
                              field: tuple) -> AsyncIterator[bytes]:
         sd = eng.stream_decoder(sid)
         raw_acc, dec_acc = [], []
-        async with client.stream("POST", upstream, json=body,
-                                 headers=headers) as r:
-            async for line in r.aiter_lines():
-                if not line.strip():
-                    continue
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    yield (line + "\n").encode()
-                    continue
-                # walk to the content field ("response") or ("message","content")
-                holder, key = obj, field[-1]
-                for part in field[:-1]:
-                    holder = holder.get(part) if isinstance(holder, dict) else None
-                chunk = holder.get(key) if isinstance(holder, dict) else None
-                if isinstance(chunk, str) and chunk:
-                    raw_acc.append(chunk)
-                    piece = sd.feed(chunk)
-                    holder[key] = piece or ""
-                    if piece:
-                        dec_acc.append(piece)
-                if obj.get("done"):
-                    tail = sd.flush()
-                    if tail and isinstance(holder, dict):
-                        dec_acc.append(tail)
-                        holder[key] = (holder.get(key) or "") + tail
-                    raw, dec = "".join(raw_acc), "".join(dec_acc)
-                    eng.record_output(model, raw, dec, sid)
-                    eng.expansion_requests(raw, sid)
-                yield (json.dumps(obj) + "\n").encode()
+        saw_done = False
+        # The `field` path's parent key, so a terminal frame can carry the
+        # flushed decoder tail even when the upstream never sent `done`.
+        content_key = field[-1]
+        try:
+            async with client.stream("POST", upstream, json=body,
+                                     headers=headers) as r:
+                async for line in r.aiter_lines():
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        yield (line + "\n").encode()
+                        continue
+                    # walk to the content field ("response") or ("message","content")
+                    holder, key = obj, content_key
+                    for part in field[:-1]:
+                        holder = holder.get(part) if isinstance(holder, dict) else None
+                    chunk = holder.get(key) if isinstance(holder, dict) else None
+                    if isinstance(chunk, str) and chunk:
+                        raw_acc.append(chunk)
+                        piece = sd.feed(chunk)
+                        holder[key] = piece or ""
+                        if piece:
+                            dec_acc.append(piece)
+                    if obj.get("done"):
+                        saw_done = True
+                        tail = sd.flush()
+                        if tail and isinstance(holder, dict):
+                            dec_acc.append(tail)
+                            holder[key] = (holder.get(key) or "") + tail
+                        raw, dec = "".join(raw_acc), "".join(dec_acc)
+                        eng.record_output(model, raw, dec, sid)
+                        eng.expansion_requests(raw, sid)
+                    yield (json.dumps(obj) + "\n").encode()
+        except Exception as exc:
+            # Upstream dropped mid-stream: emit a terminal frame carrying the
+            # held decoder tail and an error, so the client sees a real end
+            # instead of a truncated 200 with no `done`.
+            tail = sd.flush()
+            err_obj = {"model": model, "done": True, "done_reason": "error",
+                       "error": f"tokenfold: upstream stream failed: {exc}"}
+            if tail:
+                err_obj[content_key] = tail
+            yield (json.dumps(err_obj) + "\n").encode()
+            return
+        if not saw_done:
+            # Stream ended cleanly but without a `done` object: don't strand the
+            # held buffer, and give the client a terminal frame to close on.
+            tail = sd.flush()
+            raw, dec = "".join(raw_acc), "".join(dec_acc) + (tail or "")
+            eng.record_output(model, raw, dec, sid)
+            eng.expansion_requests(raw, sid)
+            end_obj = {"model": model, "done": True, "done_reason": "stop"}
+            if tail:
+                end_obj[content_key] = tail
+            yield (json.dumps(end_obj) + "\n").encode()
 
     # -----------------------------------------------------------------
     # transparent passthrough for the rest of the native surface
