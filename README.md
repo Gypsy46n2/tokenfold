@@ -1,5 +1,7 @@
 # TokenFold
 
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/Gypsy46n2)
+
 **Transparent token-compression middleware for LLM communication.**
 
 TokenFold is a local reverse proxy that sits between any chat client or
@@ -240,9 +242,16 @@ configure. Metrics store counts, hashes, and latencies — never text, never
 credentials. State lives in `%LOCALAPPDATA%\tokenfold` (Windows) /
 `~/.local/share/tokenfold` (Linux); delete it to reset.
 
+## Support
+
+TokenFold is free and open source. If it saves you tokens (and money),
+you can support development here:
+
+**☕ [buymeacoffee.com/Gypsy46n2](https://buymeacoffee.com/Gypsy46n2)**
+
 ## Status
 
 v0.1.0 — working proxy, verified against Ollama (Qwen/Gemma family) with
 exact-tokenizer benchmarks for GPT/Qwen/Llama/DeepSeek/Mistral/Gemma and
 estimated counts for Claude (exact via `count_tokens` when a key is
-configured). Private repository; not yet licensed for redistribution.
+configured). Open source under the [MIT License](LICENSE).
