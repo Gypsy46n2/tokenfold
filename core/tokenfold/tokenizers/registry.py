@@ -21,12 +21,28 @@ All counters are cached; counting is microseconds after first load.
 from __future__ import annotations
 
 import functools
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-ASSETS = Path(__file__).resolve().parent.parent.parent / "assets" / "tokenizers"
+# Bug (found live, agent-manager integration 2026-08-21): a plain `pip install <path>`
+# only bundles the tokenfold* Python package (pyproject.toml's packages.find only
+# discovers Python packages) -- this assets/ directory sits OUTSIDE it in the source
+# tree, so an installed copy under site-packages has no such sibling at all and
+# _hf_counter's Tokenizer.from_file() call fails outright the moment a real request
+# needs a non-tiktoken/non-estimate profile (every open-weights model: Qwen, Llama,
+# DeepSeek, Mistral, Gemma). TOKENFOLD_ASSETS_DIR lets a deployment point this at the
+# real assets directory it already has on disk (e.g. an uninstalled source checkout)
+# without needing to restructure the package or duplicate the tokenizer JSON files into
+# every venv. Falls through to the original source-tree-relative guess when unset, so
+# running directly from an uninstalled checkout (`python -m tokenfold.cli`) is
+# unaffected. The real fix is packaging assets/ as package data (MANIFEST.in +
+# package-data in pyproject.toml); this env var is the safe stopgap until that lands.
+_env_assets = os.environ.get("TOKENFOLD_ASSETS_DIR")
+ASSETS = Path(_env_assets) if _env_assets else \
+    Path(__file__).resolve().parent.parent.parent / "assets" / "tokenizers"
 
 
 @dataclass(frozen=True)

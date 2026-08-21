@@ -39,7 +39,18 @@ class Engine:
                session_id: str | None = None) -> tuple[list[dict], EncodeReport]:
         cache_key = None
         if self.cfg.mode != "OFF" and len(messages) == 1:
-            basis = json.dumps([messages, model, self.cfg.mode,
+            # Bug (found live, agent-manager integration 2026-08-21): the cache key
+            # never included session_id, so a cache hit could replay a DIFFERENT
+            # session's cached response for byte-identical single-message content --
+            # skipping self.encoder.encode() entirely on a hit also skips session.save()
+            # (turn/used_codes never advance for the session that got served the cached
+            # copy). Confirmed live: repeated identical prompts across separate calls
+            # returned session_id="cache" every time, silently starving that session's
+            # own turn counter of the increments the session-continuity mechanism
+            # depends on. Including session_id makes a hit only ever replay THIS
+            # session's own prior response, which is the only case where skipping
+            # encode() (and its session-state update) is actually correct.
+            basis = json.dumps([messages, model, self.cfg.mode, session_id,
                                 len(self.dict.generations)], ensure_ascii=False)
             cache_key = hashlib.sha256(basis.encode()).hexdigest()
             hit = self.metrics.cache_get(cache_key)
