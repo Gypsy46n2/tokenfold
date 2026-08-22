@@ -17,8 +17,17 @@ from .session import Session
 
 _CODE = re.compile(r"\b([KPE]\d+)\b")
 _REF = re.compile(r"\[(?:ref|code):([0-9a-f]{16})[^\]]*\]")
-# a partial code possibly still growing at the end of the buffer
-_TAIL_RISK = re.compile(r"(?:[KPE]\d*|\[(?:r(?:e(?:f)?)?|c(?:o(?:de?)?)?)?[^\]]*)$")
+# A partial code/marker possibly still growing at the end of the buffer, held
+# back until it completes. Two guards learned from real streams:
+#   * (?<![\w]) — a code is only a risk at a word boundary; without this,
+#     "OK1" holds "K1" and later re-emits it at buffer-start where \b matches,
+#     corrupting "Board OK1" into "Board Oanalyze the program".
+#   * the bracket branch is capped in feed(), so a lone "[" never holds the
+#     rest of the reply until stream end.
+_TAIL_RISK = re.compile(r"(?:(?<![\w])[KPE]\d*|\[(?:r(?:e(?:f)?)?|c(?:o(?:de?)?)?)?[^\]]*)$")
+# A real [ref:...]/[code:...] marker is short and whitespace-free; anything the
+# holdback grows past this is not one, so stop holding and emit it.
+_MARKER_MAX = 48
 
 
 class Decoder:
@@ -51,6 +60,14 @@ class StreamDecoder:
     def feed(self, delta: str) -> str:
         self.buf += delta
         m = _TAIL_RISK.search(self.buf)
+        if m:
+            tail = self.buf[m.start():]
+            # A bracket that has outgrown any real marker (too long, or carrying
+            # whitespace a ref never has) is not one — stop holding it, or a
+            # stray "[" stalls the whole stream waiting for a "]" that never
+            # comes.
+            if tail.startswith("[") and (len(tail) > _MARKER_MAX or any(c in tail for c in " \t\r\n")):
+                m = None
         safe_end = m.start() if m else len(self.buf)
         out, self.buf = self.buf[:safe_end], self.buf[safe_end:]
         return self.d.decode(out) if out else ""

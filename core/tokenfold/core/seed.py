@@ -10,6 +10,8 @@ config.seed_dictionary is true.
 
 from __future__ import annotations
 
+import re
+
 from .dictionary import Alias, Dictionary, Generation
 
 # (code, canonical expansion, surface-form regexes)
@@ -87,6 +89,10 @@ def bundle_patterns() -> list[tuple[str, str]]:
     out = []
     for pcode, members, _ in BUNDLES:
         sep = r"[;,.]?\s*(?:and\s+)?"
-        pat = sep.join(members)
+        # Each member is \b-anchored: without it K3 matches inside K30 and a
+        # trailing K6 swallows K78, so "K3; K4; K5; K6; K78" collapsed to
+        # "P18". This path (_alias_pass) ships UNVERIFIED, so that was
+        # shippable corruption, not just an efficacy loss.
+        pat = sep.join(rf"\b{re.escape(m)}\b" for m in members)
         out.append((pat, pcode))
     return out

@@ -18,6 +18,7 @@ Returns (encoded_messages, EncodeReport).
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from dataclasses import dataclass, field
@@ -53,13 +54,24 @@ class EncodeReport:
     original_tokens: int = 0
     encoded_tokens: int = 0
     dictionary_overhead: int = 0
+    # what the injection block really costs THIS request once provider prefix
+    # caching is accounted for (face value on a first ship, discounted on
+    # byte-identical repeats). dictionary_overhead stays face value.
+    effective_overhead: int = 0
     latency_ms: float = 0.0
     fallback: bool = False
+    # "" (no fallback) | "not-worth-it" (invariant shipped the original —
+    # correct economics, not a failure) | "error:<ExcName>" (real failure)
+    fallback_reason: str = ""
     messages: list[MessageReport] = field(default_factory=list)
 
     @property
     def saved(self) -> int:
         return self.original_tokens - self.encoded_tokens - self.dictionary_overhead
+
+    @property
+    def saved_effective(self) -> int:
+        return self.original_tokens - self.encoded_tokens - self.effective_overhead
 
     @property
     def pct(self) -> float:
@@ -83,9 +95,13 @@ class Encoder:
                               exact_tokenizer=prof.exact)
         try:
             return self._encode(messages, model, prof, report, t0, session_id, provider)
-        except Exception:
-            # FAILURE BEHAVIOR: passthrough, always.
+        except Exception as exc:
+            # FAILURE BEHAVIOR: passthrough, always — but never silently:
+            # a real error is a bug to find, not a statistic to shrug at.
+            logging.getLogger("tokenfold.encoder").exception(
+                "encode failed, passing request through untouched")
             report.fallback = True
+            report.fallback_reason = f"error:{type(exc).__name__}"
             report.encoded_tokens = report.original_tokens = self._count_all(messages, prof)
             report.latency_ms = (time.perf_counter() - t0) * 1000
             return messages, report
@@ -117,6 +133,36 @@ class Encoder:
         if cfg.mode == "OFF":
             report.original_tokens = report.encoded_tokens = self._count_all(messages, prof)
             report.latency_ms = (time.perf_counter() - t0) * 1000
+            return messages, report
+
+        # Tiny requests can never clear the min-savings thresholds: the full
+        # pipeline runs only to have the never-larger invariant revert it,
+        # which burned latency AND stamped fallback=True — live metrics showed
+        # a cluster of 5–35 token requests inflating fallback_pct with what is
+        # really just correct "nothing to do here" behavior. Skip early.
+        total_tok = self._count_all(messages, prof)
+        if total_tok < cfg.min_encode_tokens:
+            # Learning must NOT be gated with the pipeline: short boilerplate
+            # repeated across many tiny requests is exactly what the nursery
+            # exists to notice. Same observe step the candidate search runs.
+            for m in messages:
+                if m.get("role") in ("user", "system"):
+                    try:
+                        skel, _regs = protected.extract(self._text(m))
+                        terse = phrases.compress(skel)
+                    except Exception:
+                        continue
+                    for clause in [c.strip() for c in _CLAUSE_SPLIT.split(terse)
+                                   if len(c.strip()) > 15]:
+                        if "⟦" not in clause:
+                            self.dict.observe(clause, prof.count(clause))
+            self.dict.save()
+            report.original_tokens = report.encoded_tokens = total_tok
+            report.messages.append(MessageReport(
+                index=0, representation="small-passthrough",
+                original_tokens=total_tok, encoded_tokens=total_tok))
+            report.latency_ms = (time.perf_counter() - t0) * 1000
+            session.save()          # the turn increment above must still stick
             return messages, report
 
         # observe entities across all user/system text
@@ -155,6 +201,19 @@ class Encoder:
                 continue
 
             is_old = i < fold_cutoff and role in ("user", "assistant", "tool") and i > 0
+            # An assistant message carrying tool_calls must NEVER be folded away:
+            # its paired role:"tool" message (kept as a [ref:...] below) has a
+            # tool_call_id that the API requires be introduced by a preceding
+            # assistant tool_calls. Omit the assistant turn and the upstream
+            # 400s the whole request. Keep it verbatim (these turns are short).
+            if is_old and m.get("tool_calls"):
+                out.append(m)
+                out_noalias.append(m)
+                report.encoded_tokens += orig_tok
+                report.messages.append(MessageReport(
+                    index=i, representation="tool-call", original_tokens=orig_tok,
+                    encoded_tokens=orig_tok))
+                continue
             if is_old and role == "tool":
                 # tool results: keep the message (API pairing with tool_calls)
                 # but replace bulky old content with a reference
@@ -219,13 +278,18 @@ class Encoder:
         if self.folder and digest_mode:
             # background: squeeze old digest lines with the tiny model
             self.folder.maybe_compact_digest(session, window)
+        # The digest is NOT inserted as its own system message: strict chat
+        # templates (Qwen3-family and others) raise "System message must be at
+        # the beginning" for any system message past index 0, and the upstream
+        # turns that into a hard 500. It is composed into the LEADING system
+        # message at the end of assembly instead — after the byte-stable
+        # DICT/style injections, so the stable prefix stays cacheable and the
+        # per-turn digest is the only part that changes.
+        digest_base = digest_alias = ""
         if digest_mode and digest_lines:
-            base = "HIST (compact digest of earlier turns; ask to expand any "\
-                   "[code:...] ref): " + " | ".join(digest_lines)
-            aliased = self._alias_pass(base, session)
-            pos = 1 if out and out[0].get("role") == "system" else 0
-            out.insert(pos, {"role": "system", "content": aliased})
-            out_noalias.insert(pos, {"role": "system", "content": base})
+            digest_base = "HIST (compact digest of earlier turns; ask to expand any "\
+                          "[code:...] ref): " + " | ".join(digest_lines)
+            digest_alias = self._alias_pass(digest_base, session)
 
         # ---- stable injections (system head) --------------------------
         # The upstream API is stateless: definitions must ride along on EVERY
@@ -254,7 +318,10 @@ class Encoder:
         if cfg.inject_bootstrap:
             from .dictionary import find_codes
             est = self.dict.established_codes()
-            used = [c for m in out for c in find_codes(self._text(m)) if c in est]
+            scan_texts = [self._text(m) for m in out]
+            if digest_alias:
+                scan_texts.append(digest_alias)  # the digest may carry codes too
+            used = [c for t in scan_texts for c in find_codes(t) if c in est]
             # P-bundles are defined by member reference: pull members in too
             for code in list(used):
                 al = self.dict.aliases.get(code)
@@ -282,7 +349,8 @@ class Encoder:
                 if bs:
                     inject_parts.append(bs)
         ent_block = session.entity_block()
-        if ent_block and self._entity_codes_used(out, session):
+        if ent_block and self._entity_codes_used(
+                out + ([{"content": digest_alias}] if digest_alias else []), session):
             inject_parts.append(ent_block)
         block = "\n".join(inject_parts) if inject_parts else ""
         overhead = prof.count(block) if block else 0
@@ -292,26 +360,25 @@ class Encoder:
         from .session import content_hash
         block_hash = content_hash(block) if block else ""
         eff_overhead = overhead
-        # Bug (found scanning for more agent-manager blockers, 2026-08-21): this discount
-        # applied unconditionally, but it's only economically real for a provider with
-        # actual prompt-prefix caching (e.g. Anthropic's cache_control) -- a plain
-        # stateless HTTP upstream (Ollama, this pipeline's entire real traffic) re-reads
-        # the full injection block byte-for-byte on every single call regardless of
-        # session.turn or whether the exact block was sent before; there is no mechanism
-        # backing the "amortizes over future turns" assumption for it at all. That let
-        # the total-cost decision below pick the alias path using an artificially cheap
-        # eff_overhead, only for the honest absolute-invariant check further down (which
-        # correctly uses the REAL, undiscounted overhead) to catch the mismatch and
-        # revert everything -- confirmed live against real agent-manager traffic: an
-        # observability_fix prompt whose alias substitution genuinely matched 9
-        # established codes (1574->1371 tokens, 203 saved) still reverted to the full
-        # original every time, because the honest glossary cost for those 9 codes (292
-        # tokens) exceeded the raw savings, and the discount-driven decision kept
-        # attempting it anyway -- 99.3% fallback rate on that task type, not a cold-start
-        # symptom (its dictionary already had 656 established codes). Gating on
-        # provider != "ollama" keeps every other caller's existing behavior (including
-        # this file's own tests, which never pass a provider) while making decisions
-        # honest for the one provider we know for certain never caches.
+        # Bug (found live against real agent-manager traffic, 2026-08-21, on top of the
+        # decision/invariant-agreement fix above): the "invest once, amortize forever"
+        # discount this block applies is only real for a provider with actual
+        # prompt-prefix caching (Anthropic's cache_control is the one real example in
+        # this codebase). Ollama -- this pipeline's entire real traffic -- re-reads the
+        # full injection block byte-for-byte on EVERY call regardless of session.turn or
+        # whether the exact block was sent before; nothing is ever actually amortized.
+        # Once decision and invariant agree (the fix just above), that stops being a
+        # wasted-attempt bug and becomes a genuine one: the alias path now reliably SHIPS
+        # once turn>=2, honestly reporting a negative `saved` (real bytes sent DID exceed
+        # the original) while `saved_effective` shows a discount-assuming "win" that
+        # never happens on the wire. Confirmed live: a real observability_fix prompt
+        # matching 9 established codes shipped at 1663 raw tokens against a 1574-token
+        # original -- an 89-token real increase, sent on every single occurrence, not
+        # just a one-time "priced-in investment" the way it would be for a provider that
+        # actually remembers the glossary between calls. Gating on provider != "ollama"
+        # keeps every other caller's behavior (including this file's own tests, which
+        # never pass a provider) identical; only the one provider we know for certain
+        # never caches stops getting an unbacked optimism bonus.
         if block and provider != "ollama" and (block_hash == session.last_inject_hash
                                                 or session.turn >= 2):
             # already-cached block, or a proven multi-turn session where the
@@ -322,13 +389,17 @@ class Encoder:
         # total-cost decision: alias set + injections vs terse-only set.
         # (The terse-style instruction is exempt: it pays for itself in
         # output tokens.)
-        total_alias = sum(prof.count(self._text(m)) for m in out)
-        total_noalias = sum(prof.count(self._text(m)) for m in out_noalias)
+        total_alias = sum(prof.count(self._text(m)) for m in out) \
+            + (prof.count(digest_alias) if digest_alias else 0)
+        total_noalias = sum(prof.count(self._text(m)) for m in out_noalias) \
+            + (prof.count(digest_base) if digest_base else 0)
         if total_noalias <= total_alias + eff_overhead:
             out = out_noalias
             inject_parts = []
             report.encoded_tokens = total_noalias
             report.dictionary_overhead = 0
+            eff_overhead = 0
+            digest_text = digest_base
             # Bug (found scanning for more agent-manager blockers, 2026-08-21): every
             # per-message MessageReport.representation was stamped inside the loop above
             # from the CANDIDATE search alone (e.g. "terse+alias" the moment alias
@@ -349,18 +420,30 @@ class Encoder:
         else:
             report.encoded_tokens = total_alias
             report.dictionary_overhead = overhead
+            report.effective_overhead = eff_overhead
             session.last_inject_hash = block_hash
+            digest_text = digest_alias
 
-        # ---- absolute invariant: NEVER ship more than the original ------
-        if report.encoded_tokens + report.dictionary_overhead \
+        # ---- invariant: never ship more than the original, judged at the
+        # SAME cache-effective overhead the decision above used. Judging
+        # here at face value while deciding at effective cost made the two
+        # disagree: the alias set won the decision on turn 2+ and was then
+        # vetoed every time, so the documented invest-and-amortize never
+        # started and established aliases were dead weight. The wire may
+        # exceed the original only on the turn a DICT block first ships —
+        # the priced-in investment — never on effective cost.
+        if report.encoded_tokens + eff_overhead \
                 >= report.original_tokens and report.original_tokens:
-            if report.encoded_tokens + report.dictionary_overhead \
+            if report.encoded_tokens + eff_overhead \
                     > report.original_tokens:
                 report.fallback = True
+                report.fallback_reason = "not-worth-it"
             report.encoded_tokens = report.original_tokens
             report.dictionary_overhead = 0
+            report.effective_overhead = 0
             out = list(messages)
             inject_parts = []
+            digest_text = ""
             # Same reporting fix as above, the full-revert case: every message actually
             # ships as the untouched original here, so every per-message representation
             # must read "original" too, not whatever the candidate search preferred
@@ -376,8 +459,14 @@ class Encoder:
                 style += " You may use DICT/ENT codes in replies."
             inject_parts.append(style)
 
-        if inject_parts:
-            block = "\n".join(inject_parts)
+        # One leading system message carries everything: injections first
+        # (byte-stable → prefix-cacheable), then the per-turn digest. Never a
+        # second system message — strict chat templates hard-fail on those.
+        tail_parts = list(inject_parts)
+        if digest_text:
+            tail_parts.append(digest_text)
+        if tail_parts:
+            block = "\n".join(tail_parts)
             if out and out[0].get("role") == "system" and isinstance(out[0].get("content"), str):
                 out[0] = {**out[0], "content": out[0]["content"] + "\n\n" + block}
             else:
@@ -389,17 +478,20 @@ class Encoder:
 
     # ------------------------------------------------------------------
     def _alias_pass(self, text: str, session: Session) -> str:
-        """Exact-meaning alias/entity/bundle substitution (no verification
-        needed: substitutions are definitionally meaning-preserving)."""
+        """Exact-meaning alias/entity/bundle substitution. This ships WITHOUT
+        the verifier (digest lines, old-turn folds), so every substitution must
+        be word-boundary-safe: `str.replace` on an entity name turns "Agent
+        Managers" into "E1s", which the decoder's \\bE1\\b cannot expand — the
+        model then sees a broken token."""
+        import re as _re
         out = text
         for pat, code in self.dict.substitutable():
             out = pat.sub(code, out)
         from .seed import bundle_patterns
-        import re as _re
         for bp, pcode in bundle_patterns():
             out = _re.sub(bp, pcode, out)
         for name, code in session.entity_pairs():
-            out = out.replace(name, code)
+            out = _re.sub(rf"\b{_re.escape(name)}\b", code, out)
         return out
 
     def _absorb_into_digest(self, text: str, role: str, session: Session) -> str:
@@ -539,8 +631,6 @@ class Encoder:
         return noalias_best, alias_best, best_rep, best_conf, best_fails
 
     # ------------------------------------------------------------------
-    _CODE_TOKEN_RE = re.compile(r"\b[KPE]\d+\b")
-
     # Bug (found live, agent-manager integration 2026-08-21): the old version replaced
     # codes one at a time with str.replace(), first for K/P codes (dict iteration =
     # insertion/mint order, so short codes always come first) then for E-codes in a
@@ -560,10 +650,15 @@ class Encoder:
     # reuses that exact approach instead of two divergent, both-broken loops.
     @staticmethod
     def _expand_codes(text: str, expansions: dict[str, str], session: Session) -> str:
-        if session.entities:
-            expansions = {**expansions, **{e.code: e.name for e in session.entities.values()}}
-        return Encoder._CODE_TOKEN_RE.sub(
-            lambda m: expansions.get(m.group(0), m.group(0)), text)
+        # Must expand exactly the way the real Decoder does: whole codes at
+        # word boundaries, one pass. Naive substring replace expanded K1
+        # INSIDE K101, so the verifier judged a corrupted decoded form and
+        # rejected every candidate the moment codes grew past two digits.
+        from .dictionary import _CODE_RE
+        exp = dict(expansions)
+        for e in session.entities.values():
+            exp.setdefault(e.code, e.name)
+        return _CODE_RE.sub(lambda m: exp.get(m.group(1), m.group(0)), text)
 
     def _codes_used(self, msgs: list[dict]) -> bool:
         from .dictionary import find_codes

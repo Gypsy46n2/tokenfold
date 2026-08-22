@@ -356,6 +356,47 @@ def test_boilerplate_session_adopts_aliases():
     assert rep.saved > rep.original_tokens * 0.5   # >50% by turn 4
 
 
+def test_ollama_provider_never_ships_more_raw_tokens_than_original():
+    # Regression (found live against real agent-manager traffic, 2026-08-21, layered on
+    # top of the decision/invariant-agreement fix from earlier the same day): once
+    # decision and invariant agree on the SAME (discounted) eff_overhead, the alias path
+    # reliably ships -- correct for a provider with real prompt-prefix caching, where the
+    # discount reflects genuine amortized cost. Ollama has no such mechanism: it re-reads
+    # the full injection block byte-for-byte on every call. Confirmed live: a real
+    # multi-code observability_fix prompt shipped 1663 raw tokens against a 1574-token
+    # original once turn>=2 unlocked the discount -- an 89-token real increase, not a
+    # one-time investment, since nothing is ever actually amortized for this provider.
+    # provider="ollama" must keep the decision honest at every turn, matching what a
+    # provider with zero memory of past calls actually experiences.
+    from tokenfold.core.seed import seed
+    enc = Encoder(_cfg(inject_bootstrap=True))
+    seed(enc.dict)
+    boiler = ("Do not break existing functionality, run the tests before "
+              "finishing, preserve all public APIs, update the documentation "
+              "whenever behavior changes, and never modify files that are "
+              "unrelated to the current task. ")
+    for i in range(4):
+        msgs = [{"role": "user", "content": boiler + f"Do task number {i}."}]
+        out, rep = enc.encode(msgs, "gpt-4o", session_id="ollama-turns", provider="ollama")
+        assert rep.encoded_tokens + rep.dictionary_overhead <= rep.original_tokens, \
+            f"turn {i}: shipped more raw tokens than the original for provider=ollama"
+
+    # The same repeated boilerplate through a provider that DOES have real caching must
+    # still reach the documented amortized win (unchanged behavior, not weakened by the
+    # gate above) -- same content, same turn count, only the declared provider differs.
+    enc2 = Encoder(_cfg(inject_bootstrap=True))
+    seed(enc2.dict)
+    last_rep = None
+    for i in range(4):
+        msgs = [{"role": "user", "content": boiler + f"Do task number {i}."}]
+        _, last_rep = enc2.encode(msgs, "gpt-4o", session_id="anthropic-turns", provider="anthropic")
+    # saved (face value) can still be negative here -- the DICT block's real byte cost
+    # doesn't vanish just because a caching provider would bill/process it cheaply.
+    # saved_effective is the number that's supposed to turn positive once the discount
+    # is legitimately in play, which is exactly what this asserts stayed true.
+    assert last_rep.saved_effective > 0
+
+
 # ------------------------------------------------- expansion + tool folding
 def test_pending_expansion_ships_original_once():
     from tokenfold.core.session import Session, content_hash
@@ -416,6 +457,182 @@ def test_output_metrics_split(tmp_path):
     s = m.summary()
     assert s["orig"] == 100 and s["saved"] == 40                # input side only
     assert s["output"]["generated"] == 50 and s["output"]["saved"] == 30
+
+
+# ------------------------------------------------- imported packs activate
+def test_import_json_mints_a_generation_and_activates_codes():
+    """An imported pack is useless until its codes are generation-frozen:
+    only established codes substitute or ship in a DICT block. Importing
+    must therefore mint; re-importing the same pack must not mint again."""
+    import json as _json
+    d = Dictionary(scope="import-activation-test")
+    from tokenfold.core.seed import seed
+    seed(d)
+    pack = _json.dumps({"aliases": {
+        "K201": {"code": "K201",
+                 "expansion": "always write the changelog entry last",
+                 "surface_forms": [r"always write the changelog entry last"]}}})
+    d.import_json(pack)
+    assert "K201" in d.established_codes(), "imported code must be established"
+    assert any(c == "K201" for _, c in d.substitutable()), "and substitutable"
+    gens = len(d.generations)
+    d.import_json(pack)
+    assert len(d.generations) == gens, "re-import of the same pack must not mint"
+
+
+def test_code_expansion_has_no_substring_collisions():
+    """K1 must never expand inside K101. The verifier judges candidates on
+    their decoded form, so a collision there silently killed every encoding
+    that used a 3+ digit code — and the Decoder must agree byte-for-byte."""
+    import json as _json
+    d = Dictionary(scope="collision-test")
+    from tokenfold.core.seed import seed
+    seed(d)
+    d.import_json(_json.dumps({"aliases": {
+        "K101": {"code": "K101", "expansion": "the hundred-and-first rule",
+                 "surface_forms": [r"the hundred-and-first rule"]}}}))
+    text = "apply K101 and K1 now"
+    expected = "apply the hundred-and-first rule and analyze the program now"
+    assert Decoder(d).decode(text) == expected
+    enc = Encoder(Config(), d)
+    got = enc._expand_codes(text, d.expansions(), Session("collision-s"))
+    assert got == expected, got
+
+
+def test_established_alias_pack_is_not_vetoed_at_face_value():
+    """The candidate decision prices the DICT block at cache-effective cost;
+    the never-larger invariant must judge at the SAME cost, or every alias
+    encoding that wins the decision is vetoed right after (codes then never
+    ship at all). Wire may exceed the original only when a DICT block first
+    ships — the priced-in investment."""
+    import json as _json
+    d = Dictionary(scope="invariant-consistency-test")
+    from tokenfold.core.seed import seed
+    seed(d)
+    sentence = ("Before changing architecture, agent behavior, data stores, "
+                "tool wiring, scheduler flows, or linked-machine behavior, "
+                "read the system map first and update it in the same commit.")
+    d.import_json(_json.dumps({"aliases": {
+        "K150": {"code": "K150", "expansion": sentence,
+                 "surface_forms": [__import__("re").escape(sentence)]}}}))
+    enc = Encoder(Config(), d)
+    sysm = {"role": "system", "content": "Standing rule: " + sentence}
+    history = []
+    shipped_codes = False
+    for turn in range(1, 5):
+        history.append({"role": "user",
+                        "content": f"Turn {turn}: proceed with the refactor step."})
+        msgs = [sysm] + history
+        out, rep = enc.encode(msgs, "gpt-4o", session_id="invariant-s")
+        joined = "\n".join(m.get("content", "") for m in out
+                           if isinstance(m.get("content"), str))
+        if "K150" in joined:
+            shipped_codes = True
+        history.append({"role": "assistant", "content": f"Step {turn} done."})
+    assert shipped_codes, "an established alias never reached the wire"
+
+
+def test_digest_never_becomes_a_second_system_message():
+    """Strict chat templates (Qwen3-family) raise 'System message must be at
+    the beginning' for any system message past index 0, and the upstream turns
+    that into a hard 500. The HIST digest must therefore ride INSIDE the
+    leading system message, never as its own."""
+    enc = Encoder(Config(mode="MAX"))
+    sysm = {"role": "system", "content": "You are a terse assistant."}
+    history = []
+    hist_seen = hist_in_head = False
+    for turn in range(1, 6):
+        history.append({"role": "user",
+                        "content": f"Turn {turn}: continue the analysis of the retry helper, "
+                                   "compare the exponential and linear strategies in detail, "
+                                   "and keep the backoff capped at sixty seconds please. "
+                                   "Also restate the acceptance criteria we agreed on so the "
+                                   "reviewer can follow the whole decision without scrolling."})
+        msgs = [sysm] + history
+        out, rep = enc.encode(msgs, "gpt-4o", session_id="strict-template-s")
+        roles = [m.get("role") for m in out]
+        assert roles.count("system") <= 1, f"turn {turn}: {roles}"
+        if "system" in roles:
+            assert roles[0] == "system", f"turn {turn}: system not first: {roles}"
+        for i, m in enumerate(out):
+            if isinstance(m.get("content"), str) and "HIST" in m["content"]:
+                hist_seen = True
+                if i == 0 and m.get("role") == "system":
+                    hist_in_head = True
+        history.append({"role": "assistant", "content": f"Step {turn} done, cap held."})
+    # On turns where folding won, the digest must exist AND live in the system
+    # head. (A turn where the invariant ships the original untouched is fine.)
+    assert hist_seen, "no turn ever produced a digest - folding never engaged"
+    assert hist_in_head, "digest appeared outside the leading system message"
+
+
+def test_assistant_tool_calls_message_is_never_folded_away():
+    """An old assistant message carrying tool_calls must survive folding — its
+    paired role:'tool' message keeps a tool_call_id the API requires be
+    introduced by a preceding assistant tool_calls, or the upstream 400s."""
+    enc = Encoder(Config(mode="MAX"))
+    msgs = [
+        {"role": "system", "content": "You are a worker."},
+        {"role": "assistant", "content": "calling a tool",
+         "tool_calls": [{"id": "call_1", "type": "function",
+                         "function": {"name": "read", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "file contents " * 40},
+        {"role": "user", "content": "now summarize what you found in the file"},
+    ]
+    out, _rep = enc.encode(msgs, "gpt-4o", session_id="toolcalls-s")
+    tool_ids = {m.get("tool_call_id") for m in out if m.get("role") == "tool"}
+    call_ids = {tc["id"] for m in out if m.get("role") == "assistant"
+                for tc in (m.get("tool_calls") or [])}
+    for tid in tool_ids:
+        assert tid in call_ids, f"tool message {tid} lost its assistant tool_calls pairing"
+
+
+def test_bundle_pattern_respects_code_boundaries():
+    """K3;K4;K5;K6;K78 must NOT collapse to P18 — the trailing K6 must not
+    swallow K78 (this path ships unverified)."""
+    from tokenfold.core.seed import bundle_patterns
+    import re as _re
+    text = "rules: K3; K4; K5; K6; K78 extra"
+    for pat, pcode in bundle_patterns():
+        text = _re.sub(pat, pcode, text)
+    assert "K78" in text, f"K78 was corrupted: {text!r}"
+
+
+def test_stream_decoder_does_not_corrupt_words_ending_in_a_code():
+    """Feeding 'Board OK1' then ' done' must not turn OK1 into an expansion."""
+    from tokenfold.core.decoder import Decoder, StreamDecoder
+    d = Dictionary(scope="stream-boundary-test")
+    from tokenfold.core.seed import seed
+    seed(d)
+    sd = StreamDecoder(Decoder(d))
+    got = sd.feed("Board OK1") + sd.feed(" done") + sd.flush()
+    assert got == "Board OK1 done", repr(got)
+
+
+def test_stream_decoder_does_not_stall_on_a_lone_bracket():
+    """A '[' that never closes must be flushed, not held until stream end."""
+    from tokenfold.core.decoder import Decoder, StreamDecoder
+    d = Dictionary(scope="stream-bracket-test")
+    from tokenfold.core.seed import seed
+    seed(d)
+    sd = StreamDecoder(Decoder(d))
+    out = sd.feed("use [ to open an array literal in the language, ")
+    out += sd.feed("then keep typing normally for a while afterward")
+    # the bracket-held text must have been emitted mid-stream, not stranded
+    assert "to open an array literal" in (out + sd.flush())
+
+
+def test_entity_alias_pass_respects_word_boundaries():
+    """_alias_pass must not turn 'Agent Managers' into 'E1s' (unverified path)."""
+    from tokenfold.core.session import Session
+    enc = Encoder(Config())
+    s = Session("entity-boundary-s")
+    s.observe_entities("Agent Manager is the system. Agent Manager rocks.")
+    # force an entity to exist with a code
+    if s.entity_pairs():
+        out = enc._alias_pass("The Agent Managers shipped it", s)
+        assert "s" in out  # plural survives
+        assert "E" not in out or "Managers" in out or "E1s" not in out, out
 
 
 # ------------------------------------------------------------- engine cache
@@ -503,3 +720,56 @@ def test_engine_decode_uses_the_matching_scope_dictionary():
         == "see an observability-scoped phrase for context"
     assert eng.decode("see K1 for context", "sess", scope="arch_discovery") \
         == "see an arch-discovery-scoped phrase for context"
+
+
+# ------------------------------------------------- fallback accounting
+def test_small_request_passes_through_without_counting_as_fallback():
+    """Tiny requests can never clear min-savings; they must skip the pipeline
+    (no latency burned) and must NOT be stamped fallback — live metrics showed
+    a cluster of 5–35 token requests inflating fallback_pct with what is
+    really correct 'nothing to do here' behavior."""
+    enc = Encoder(Config(mode="MAX"))
+    out, rep = enc.encode([{"role": "user", "content": "hi there"}],
+                          "gpt-4o", session_id="small-req-s")
+    assert out == [{"role": "user", "content": "hi there"}]
+    assert not rep.fallback and rep.fallback_reason == ""
+    assert [m.representation for m in rep.messages] == ["small-passthrough"]
+
+
+def test_encoder_error_fallback_carries_a_reason():
+    """A real error must be distinguishable from an economics revert."""
+    enc = Encoder(Config())
+    orig = enc._encode
+    def boom(*a, **k):
+        raise RuntimeError("synthetic")
+    enc._encode = boom
+    try:
+        out, rep = enc.encode([{"role": "user", "content": "x " * 100}], "gpt-4o")
+    finally:
+        enc._encode = orig
+    assert rep.fallback and rep.fallback_reason == "error:RuntimeError"
+    assert out[0]["content"] == "x " * 100
+
+
+def test_metrics_summary_splits_fallback_and_reports_effective_savings(tmp_path):
+    from tokenfold.core.metrics import Metrics
+    from tokenfold.core.encoder import EncodeReport
+    m = Metrics(path=str(tmp_path / "m.sqlite3"))
+    ok = EncodeReport(session_id="s", model="x", profile="p", exact_tokenizer=True)
+    ok.original_tokens, ok.encoded_tokens = 100, 60
+    ok.dictionary_overhead, ok.effective_overhead = 30, 3
+    m.record(ok)
+    err = EncodeReport(session_id="s", model="x", profile="p", exact_tokenizer=True,
+                       fallback=True, fallback_reason="error:ValueError")
+    err.original_tokens = err.encoded_tokens = 50
+    m.record(err)
+    rev = EncodeReport(session_id="s", model="x", profile="p", exact_tokenizer=True,
+                       fallback=True, fallback_reason="not-worth-it")
+    rev.original_tokens = rev.encoded_tokens = 50
+    m.record(rev)
+    s = m.summary()
+    assert s["n"] == 3
+    assert round(s["error_pct"]) == 33 and round(s["reverted_pct"]) == 33
+    assert s["saved"] == 100 - 60 - 30            # face value
+    assert s["saved_effective"] == 100 - 60 - 3   # prefix-cache aware
+    assert s["overhead_effective"] == 3
