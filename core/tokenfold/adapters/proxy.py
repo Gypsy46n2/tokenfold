@@ -19,6 +19,7 @@ Endpoints: /v1/chat/completions (encode+decode, streaming + non-streaming),
 from __future__ import annotations
 
 import json
+import os
 from typing import AsyncIterator
 
 import httpx
@@ -35,7 +36,13 @@ HOP_BY_HOP = {"host", "content-length", "connection", "keep-alive",
 def create_app(engine: Engine | None = None) -> FastAPI:
     app = FastAPI(title="TokenFold", version="0.1.0")
     eng = engine or Engine()
-    client = httpx.AsyncClient(timeout=httpx.Timeout(300, connect=15))
+    # Upstream read timeout. 300s proved too short for non-streamed replies from
+    # a big CPU-offloaded model (~3 tok/s: a long reply alone passes 5 minutes) --
+    # the proxy cancelled mid-generation and the caller saw a bare 500. For
+    # streaming responses this is a per-chunk gap limit, not a total, so the
+    # higher default costs nothing there.
+    timeout_s = float(os.environ.get("TOKENFOLD_UPSTREAM_TIMEOUT_S", "1800"))
+    client = httpx.AsyncClient(timeout=httpx.Timeout(timeout_s, connect=15))
 
     def _upstream(req: Request) -> str:
         return (req.headers.get("x-tokenfold-upstream")
