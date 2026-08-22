@@ -76,8 +76,9 @@ def add_ollama_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -> N
         model = body.get("model", "")
         messages = body.get("messages", [])
         sid_hdr = request.headers.get("x-tokenfold-session")
+        scope_hdr = request.headers.get("x-tokenfold-scope")
         encoded, report = eng.encode(messages, model, provider="ollama",
-                                     session_id=sid_hdr)
+                                     session_id=sid_hdr, scope=scope_hdr)
         body["messages"] = encoded
         sid = report.session_id
 
@@ -87,7 +88,7 @@ def add_ollama_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -> N
 
         if body.get("stream"):
             return StreamingResponse(
-                _stream_ndjson(upstream, body, headers, model, sid,
+                _stream_ndjson(upstream, body, headers, model, sid, scope_hdr,
                                field=("message", "content")),
                 media_type="application/x-ndjson")
 
@@ -123,8 +124,8 @@ def add_ollama_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -> N
             msg = obj.get("message") or {}
             if isinstance(msg.get("content"), str):
                 raw_txt = msg["content"]
-                msg["content"] = eng.decode(raw_txt, sid)
-                eng.record_output(model, raw_txt, msg["content"], sid)
+                msg["content"] = eng.decode(raw_txt, sid, scope=scope_hdr)
+                eng.record_output(model, raw_txt, msg["content"], sid, scope=scope_hdr)
             return JSONResponse(obj, status_code=r.status_code)
         except Exception:
             return Response(r.content, r.status_code)
@@ -143,6 +144,7 @@ def add_ollama_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -> N
         _apply_header_overrides(request)
         model = body.get("model", "")
         sid_hdr = request.headers.get("x-tokenfold-session")
+        scope_hdr = request.headers.get("x-tokenfold-scope")
 
         # single-string prompt -> single-message encode, then rebuild.
         # Any system-role message the encoder emits (dictionary preamble)
@@ -152,7 +154,7 @@ def add_ollama_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -> N
             msgs.append({"role": "system", "content": body["system"]})
         msgs.append({"role": "user", "content": body.get("prompt", "")})
         encoded, report = eng.encode(msgs, model, provider="ollama",
-                                     session_id=sid_hdr)
+                                     session_id=sid_hdr, scope=scope_hdr)
         sid = report.session_id
         sys_parts = [m.get("content", "") for m in encoded
                      if m.get("role") == "system" and m.get("content")]
@@ -168,7 +170,7 @@ def add_ollama_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -> N
 
         if body.get("stream"):
             return StreamingResponse(
-                _stream_ndjson(upstream, body, headers, model, sid,
+                _stream_ndjson(upstream, body, headers, model, sid, scope_hdr,
                                field=("response",)),
                 media_type="application/x-ndjson")
 
@@ -198,17 +200,17 @@ def add_ollama_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -> N
                         pass
             if isinstance(obj.get("response"), str):
                 raw_txt = obj["response"]
-                obj["response"] = eng.decode(raw_txt, sid)
-                eng.record_output(model, raw_txt, obj["response"], sid)
+                obj["response"] = eng.decode(raw_txt, sid, scope=scope_hdr)
+                eng.record_output(model, raw_txt, obj["response"], sid, scope=scope_hdr)
             return JSONResponse(obj, status_code=r.status_code)
         except Exception:
             return Response(r.content, r.status_code)
 
     # -----------------------------------------------------------------
     async def _stream_ndjson(upstream: str, body: dict, headers: dict,
-                             model: str, sid: str,
+                             model: str, sid: str, scope: str | None,
                              field: tuple) -> AsyncIterator[bytes]:
-        sd = eng.stream_decoder(sid)
+        sd = eng.stream_decoder(sid, scope=scope)
         raw_acc, dec_acc = [], []
         async with client.stream("POST", upstream, json=body,
                                  headers=headers) as r:
@@ -237,7 +239,7 @@ def add_ollama_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -> N
                         dec_acc.append(tail)
                         holder[key] = (holder.get(key) or "") + tail
                     raw, dec = "".join(raw_acc), "".join(dec_acc)
-                    eng.record_output(model, raw, dec, sid)
+                    eng.record_output(model, raw, dec, sid, scope=scope)
                     eng.expansion_requests(raw, sid)
                 yield (json.dumps(obj) + "\n").encode()
 

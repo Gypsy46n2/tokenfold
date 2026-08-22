@@ -112,7 +112,8 @@ padding:.3rem .7rem;text-align:left}}h1{{font-size:1.3rem}}
         model = body.get("model", "")
         messages = body.get("messages", [])
         sid_hdr = request.headers.get("x-tokenfold-session")
-        encoded, report = eng.encode(messages, model, session_id=sid_hdr)
+        scope_hdr = request.headers.get("x-tokenfold-scope")
+        encoded, report = eng.encode(messages, model, session_id=sid_hdr, scope=scope_hdr)
         body["messages"] = encoded
         sid = report.session_id
 
@@ -122,7 +123,7 @@ padding:.3rem .7rem;text-align:left}}h1{{font-size:1.3rem}}
 
         if body.get("stream"):
             async def gen() -> AsyncIterator[bytes]:
-                sd = eng.stream_decoder(sid)
+                sd = eng.stream_decoder(sid, scope=scope_hdr)
                 raw_acc, dec_acc = [], []
                 async with client.stream("POST", upstream, json=body,
                                          headers=headers) as r:
@@ -138,7 +139,7 @@ padding:.3rem .7rem;text-align:left}}h1{{font-size:1.3rem}}
                                 dec_acc.append(tail)
                                 yield _sse_delta(tail)
                             raw, dec = "".join(raw_acc), "".join(dec_acc)
-                            eng.record_output(model, raw, dec, sid)
+                            eng.record_output(model, raw, dec, sid, scope=scope_hdr)
                             # streamed: can't retry, but note the ask so the
                             # NEXT request ships the original automatically
                             eng.expansion_requests(raw, sid)
@@ -188,8 +189,8 @@ padding:.3rem .7rem;text-align:left}}h1{{font-size:1.3rem}}
                 msg = ch.get("message", {})
                 if isinstance(msg.get("content"), str):
                     raw = msg["content"]
-                    msg["content"] = eng.decode(raw, sid)
-                    eng.record_output(model, raw, msg["content"], sid)
+                    msg["content"] = eng.decode(raw, sid, scope=scope_hdr)
+                    eng.record_output(model, raw, msg["content"], sid, scope=scope_hdr)
             return JSONResponse(obj, status_code=r.status_code)
         except Exception:
             return Response(r.content, r.status_code)
@@ -245,7 +246,8 @@ def add_anthropic_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -
         # benefit at all. Not yet observed live against this route in practice; caught by
         # code inspection, matching the same header every sibling route already reads.
         sid_hdr = request.headers.get("x-tokenfold-session")
-        encoded, report = eng.encode(msgs, model, session_id=sid_hdr)
+        scope_hdr = request.headers.get("x-tokenfold-scope")
+        encoded, report = eng.encode(msgs, model, session_id=sid_hdr, scope=scope_hdr)
         new_sys = None
         out_msgs = []
         for m in encoded:
@@ -263,7 +265,7 @@ def add_anthropic_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -
 
         if body.get("stream"):
             async def gen():
-                sd = eng.stream_decoder(sid)
+                sd = eng.stream_decoder(sid, scope=scope_hdr)
                 async with client.stream("POST", f"{upstream}/messages",
                                          json=body, headers=headers) as r:
                     async for line in r.aiter_lines():
@@ -293,7 +295,7 @@ def add_anthropic_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -
             obj = r.json()
             for block in obj.get("content", []):
                 if block.get("type") == "text":
-                    block["text"] = eng.decode(block["text"], sid)
+                    block["text"] = eng.decode(block["text"], sid, scope=scope_hdr)
             return JSONResponse(obj, status_code=r.status_code)
         except Exception:
             return Response(r.content, r.status_code)

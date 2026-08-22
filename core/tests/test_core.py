@@ -442,3 +442,64 @@ def test_engine_cache_does_not_leak_across_sessions(tmp_path, monkeypatch):
 
     from tokenfold.core.session import Session
     assert Session("session-b").turn >= 1         # session-b's own state actually advanced
+
+
+# ------------------------------------------------------------ per-scope dictionaries
+def test_engine_scopes_have_independent_dictionaries(tmp_path, monkeypatch):
+    # Grimmethy, 2026-08-21: "Each job type could have it's own folded dictionary" --
+    # a worker session bouncing between task types (observability_review,
+    # arch_discovery, etc.) was diluting every one of those templates' own real
+    # repetition into one shared dictionary. A phrase observed under one scope must
+    # never leak into another scope's nursery/dictionary.
+    from tokenfold.engine import Engine
+    from tokenfold.core.dictionary import Dictionary
+    monkeypatch.setenv("TOKENFOLD_HOME", str(tmp_path))
+    eng = Engine(_cfg(inject_bootstrap=False, seed_dictionary=False))
+
+    phrase_msg = [{"role": "user", "content":
+                   "A deterministic scanner flagged a possible issue in this project."}]
+    for _ in range(3):
+        eng.encode(phrase_msg, "gpt-4o", session_id="s1", scope="observability_review")
+
+    obs_dict = Dictionary(scope="observability_review")
+    arch_dict = Dictionary(scope="arch_discovery")
+    key = "a deterministic scanner flagged a possible issue in this project."
+    assert key in obs_dict.nursery
+    assert key not in arch_dict.nursery
+    # the engine's own default (unscoped) dictionary must be untouched too
+    assert key not in eng.dict.nursery
+
+
+def test_engine_scope_cache_does_not_leak_across_scopes(tmp_path, monkeypatch):
+    # Same class of bug as the session-cache-leak fix above, the scope axis instead of
+    # the session axis: two DIFFERENT scopes sending byte-identical content must never
+    # share a cache entry, since a hit skips scope-specific dictionary state updates
+    # (mint counters, nursery observations) the same way it would skip session state.
+    from tokenfold.engine import Engine
+    monkeypatch.setenv("TOKENFOLD_HOME", str(tmp_path))
+    eng = Engine(_cfg(inject_bootstrap=False))
+    msg = [{"role": "user", "content": "Please analyze this and that carefully."}]
+
+    eng.encode(msg, "gpt-4o", session_id="s1", scope="observability_review")
+    out2, rep2 = eng.encode(msg, "gpt-4o", session_id="s1", scope="observability_review")
+    assert rep2.session_id == "cache"              # same scope, second call: cache hit
+
+    out3, rep3 = eng.encode(msg, "gpt-4o", session_id="s1", scope="arch_discovery")
+    assert rep3.session_id != "cache"               # different scope: must NOT hit
+
+
+def test_engine_decode_uses_the_matching_scope_dictionary():
+    # K1/K2/... mean completely different things in different scopes -- decoding
+    # against the wrong scope's dictionary must not silently expand a code as the
+    # WRONG phrase (or leave it unexpanded because that scope never defined it).
+    from tokenfold.engine import Engine
+    eng = Engine(_cfg(inject_bootstrap=False, seed_dictionary=False))
+    obs_enc = eng._encoder_for("observability_review")
+    obs_enc.dict.add_manual("K1", "an observability-scoped phrase")
+    arch_enc = eng._encoder_for("arch_discovery")
+    arch_enc.dict.add_manual("K1", "an arch-discovery-scoped phrase")
+
+    assert eng.decode("see K1 for context", "sess", scope="observability_review") \
+        == "see an observability-scoped phrase for context"
+    assert eng.decode("see K1 for context", "sess", scope="arch_discovery") \
+        == "see an arch-discovery-scoped phrase for context"
