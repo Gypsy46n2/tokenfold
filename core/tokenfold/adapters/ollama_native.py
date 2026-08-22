@@ -31,6 +31,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from ..engine import Engine
+from .proxy import STREAM_TIMEOUT
 
 HOP_BY_HOP = {"host", "content-length", "connection", "keep-alive",
               "transfer-encoding", "upgrade", "proxy-authorization", "te",
@@ -217,7 +218,7 @@ def add_ollama_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -> N
         # flushed decoder tail even when the upstream never sent `done`.
         content_key = field[-1]
         try:
-            async with client.stream("POST", upstream, json=body,
+            async with client.stream("POST", upstream, json=body, timeout=STREAM_TIMEOUT,
                                      headers=headers) as r:
                 async for line in r.aiter_lines():
                     if not line.strip():

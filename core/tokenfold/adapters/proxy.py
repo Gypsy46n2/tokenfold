@@ -32,15 +32,25 @@ HOP_BY_HOP = {"host", "content-length", "connection", "keep-alive",
               "transfer-encoding", "upgrade", "proxy-authorization", "te",
               "trailers", "accept-encoding"}
 
+# Adaptive timeout for streamed upstream requests: no total limit, only a
+# stall window between chunks. While tokens flow the request lives; a true
+# stall (model wedged, connection dead) still gets reaped. The window is wide
+# because the silent stretch before the FIRST token legitimately includes
+# model load + full prompt eval, which can take minutes on a CPU-offloaded
+# model.
+STREAM_STALL_S = float(os.environ.get("TOKENFOLD_STREAM_STALL_S", "600"))
+STREAM_TIMEOUT = httpx.Timeout(None, connect=15, read=STREAM_STALL_S, write=60, pool=15)
+
 
 def create_app(engine: Engine | None = None) -> FastAPI:
     app = FastAPI(title="TokenFold", version="0.1.0")
     eng = engine or Engine()
-    # Upstream read timeout. 300s proved too short for non-streamed replies from
-    # a big CPU-offloaded model (~3 tok/s: a long reply alone passes 5 minutes) --
-    # the proxy cancelled mid-generation and the caller saw a bare 500. For
-    # streaming responses this is a per-chunk gap limit, not a total, so the
-    # higher default costs nothing there.
+    # Upstream timeouts, adaptive by shape. Streaming requests get
+    # STREAM_TIMEOUT (below): no total cap at all, only a stall window --
+    # progress is what keeps a request alive, so a slow model can generate for
+    # an hour as long as tokens keep arriving. Non-streamed requests have no
+    # progress signal (the upstream sends nothing until the reply is complete),
+    # so they get a generous fixed read budget instead.
     timeout_s = float(os.environ.get("TOKENFOLD_UPSTREAM_TIMEOUT_S", "1800"))
     client = httpx.AsyncClient(timeout=httpx.Timeout(timeout_s, connect=15))
 
@@ -139,7 +149,7 @@ padding:.3rem .7rem;text-align:left}}h1{{font-size:1.3rem}}
             async def gen() -> AsyncIterator[bytes]:
                 sd = eng.stream_decoder(sid, scope=scope_hdr)
                 raw_acc, dec_acc = [], []
-                async with client.stream("POST", upstream, json=body,
+                async with client.stream("POST", upstream, json=body, timeout=STREAM_TIMEOUT,
                                          headers=headers) as r:
                     async for line in r.aiter_lines():
                         if not line.startswith("data:"):
@@ -280,7 +290,7 @@ def add_anthropic_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -
         if body.get("stream"):
             async def gen():
                 sd = eng.stream_decoder(sid, scope=scope_hdr)
-                async with client.stream("POST", f"{upstream}/messages",
+                async with client.stream("POST", f"{upstream}/messages", timeout=STREAM_TIMEOUT,
                                          json=body, headers=headers) as r:
                     async for line in r.aiter_lines():
                         if line.startswith("data:"):
