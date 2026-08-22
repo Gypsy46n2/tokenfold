@@ -227,9 +227,27 @@ class Encoder:
 
         # ---- stable injections (system head) --------------------------
         # The upstream API is stateless: definitions must ride along on EVERY
-        # request whose encoded content uses codes. Blocks are byte-stable
-        # (per dictionary generation / per session entity set), so provider
-        # prefix caching amortizes their real cost.
+        # request whose encoded content uses codes.
+        #
+        # Bug (found scanning for more agent-manager blockers, 2026-08-21): this used to
+        # inject bootstrap_for(session.used_codes) -- the GROW-ONLY, EVER-ACCUMULATING
+        # list of every code a session has used across its whole lifetime -- instead of
+        # `used` (already computed two lines below: just the codes this message's own
+        # content actually references). The "byte-stable prefix, provider caching
+        # amortizes it" reasoning is real for a provider with actual prompt-prefix
+        # caching (Anthropic's cache_control, the one real user of this), but this
+        # engine's `provider` argument (see Engine.encode) was never threaded down here
+        # to gate on it -- the same discount applied unconditionally, including to a
+        # plain Ollama upstream with no such mechanism, where every byte of an "amortized"
+        # glossary is fully re-sent and fully counted on every single call regardless.
+        # Confirmed live: a long-lived worker session had accumulated 116 used_codes: a
+        # single-message request whose own alias substitution genuinely won (64->22
+        # tokens) still reverted to the full original 64 tokens, because the glossary
+        # for all 116 historical codes swamped the eff_overhead comparison even after the
+        # 90% cache_discount. Injecting only `used` (a handful of codes, sized to what
+        # THIS message actually needs) fixes the decision at its root for every provider,
+        # not just non-caching ones -- a smaller glossary is a smaller cost no matter who
+        # is paying it, so this is strictly better even where real prefix caching exists.
         inject_parts: list[str] = []
         if cfg.inject_bootstrap:
             from .dictionary import find_codes
@@ -240,12 +258,25 @@ class Encoder:
                 al = self.dict.aliases.get(code)
                 if al and al.members:
                     used += [mm for mm in al.members if mm not in used]
-            # grow-only session order keeps the block prefix-stable
+            # Still tracked (grow-only, first-use order) for session-continuity
+            # bookkeeping/diagnostics even though it's no longer the injection scope.
             for c in used:
                 if c not in session.used_codes:
                     session.used_codes.append(c)
-            if used:
-                bs = self.dict.bootstrap_for(session.used_codes)
+            # Dedupe (a code can legitimately appear in more than one message, or twice
+            # via the P-bundle member pull-in above -- bootstrap_for has no dedup of its
+            # own, so an undeduped list would define the same code twice) while keeping
+            # this call's codes in session.used_codes' stable historical order rather
+            # than their raw scan order: `used`'s own order can shift call to call purely
+            # from which turns got folded/digested differently, which would make an
+            # otherwise-identical code set render a DIFFERENT block (different order,
+            # different hash) and lose the genuine repeat-detection the block_hash check
+            # just above depends on. Any code not yet in session.used_codes (first use
+            # this session) keeps its natural detection order at the end.
+            used_stable = [c for c in session.used_codes if c in used]
+            used_stable += [c for c in used if c not in session.used_codes]
+            if used_stable:
+                bs = self.dict.bootstrap_for(used_stable)
                 if bs:
                     inject_parts.append(bs)
         ent_block = session.entity_block()
@@ -276,6 +307,23 @@ class Encoder:
             inject_parts = []
             report.encoded_tokens = total_noalias
             report.dictionary_overhead = 0
+            # Bug (found scanning for more agent-manager blockers, 2026-08-21): every
+            # per-message MessageReport.representation was stamped inside the loop above
+            # from the CANDIDATE search alone (e.g. "terse+alias" the moment alias
+            # substitution wins at the single-message level) and never revisited once
+            # this total-cost gate decided the glossary-injection overhead wasn't worth
+            # it and switched the actually-shipped `out` to the noalias set instead.
+            # Metrics.summary()'s by_representation breakdown reads these labels
+            # directly, so it was reporting what was ATTEMPTED, not what was SENT --
+            # confirmed live: a real request's per-message representation read
+            # "terse+alias" while report.encoded_tokens == report.original_tokens (i.e.
+            # the whole request shipped uncompressed). Downgrading to "terse" here (what
+            # out_noalias actually contains for that index) makes the stat mean what it
+            # says.
+            for mr in report.messages:
+                if mr.representation == "terse+alias":
+                    mr.representation = "terse"
+                    mr.encoded_tokens = prof.count(self._text(out_noalias[mr.index]))
         else:
             report.encoded_tokens = total_alias
             report.dictionary_overhead = overhead
@@ -291,6 +339,13 @@ class Encoder:
             report.dictionary_overhead = 0
             out = list(messages)
             inject_parts = []
+            # Same reporting fix as above, the full-revert case: every message actually
+            # ships as the untouched original here, so every per-message representation
+            # must read "original" too, not whatever the candidate search preferred
+            # before this invariant discarded all of it.
+            for mr in report.messages:
+                mr.representation = "original"
+                mr.encoded_tokens = mr.original_tokens
 
         # style injection: output-side savings, always allowed in human mode
         if cfg.inject_terse_style and cfg.route_mode == "human":

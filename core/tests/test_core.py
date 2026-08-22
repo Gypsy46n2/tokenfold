@@ -301,6 +301,38 @@ def test_short_message_prefers_terse_over_bootstrap():
     assert rep.encoded_tokens <= rep.original_tokens
 
 
+def test_message_representation_reflects_what_actually_shipped_not_just_what_was_tried():
+    # Regression (found scanning for more agent-manager blockers, 2026-08-21):
+    # MessageReport.representation was stamped from the per-message candidate search
+    # alone and never corrected when the total-cost gate (alias body + glossary >
+    # terse-only body) or the absolute-invariant gate rejected that candidate and
+    # shipped something cheaper instead. A caller reading report.messages (or anything
+    # aggregating by representation, like Metrics.summary()'s by_representation
+    # breakdown) would see "terse+alias" for a request that, in reality, shipped
+    # uncompressed -- reporting what was ATTEMPTED, not what was SENT. Confirmed live:
+    # exactly this shape, a single-message request whose per-message alias candidate
+    # won internally (64->22 tokens) but whose overall report.encoded_tokens equaled
+    # report.original_tokens because the glossary injection cost wasn't worth it.
+    from tokenfold.core.seed import seed
+    enc = Encoder(_cfg(inject_bootstrap=True))
+    seed(enc.dict)
+    msgs = [{"role": "user", "content":
+             "Please fix the bug and make sure you preserve the existing "
+             "functionality of the parser module."}]
+    out, rep = enc.encode(msgs, "gpt-4o")
+    # This fixture is the same one test_short_message_prefers_terse_over_bootstrap uses
+    # to confirm the bootstrap gate rejects the alias candidate (dictionary_overhead ==
+    # 0, no "DICT v" block shipped) -- the new assertion here is that the per-message
+    # label agrees with that outcome instead of independently claiming "terse+alias".
+    assert rep.dictionary_overhead == 0
+    for m in rep.messages:
+        if m.representation == "terse+alias":
+            assert False, (
+                "a message reported as terse+alias must correspond to a request that "
+                "actually shipped a smaller/aliased body -- this one shipped uncompressed"
+            )
+
+
 def test_boilerplate_session_adopts_aliases():
     """Repeated boilerplate across turns: aliases + bootstrap win on total."""
     from tokenfold.core.seed import seed
