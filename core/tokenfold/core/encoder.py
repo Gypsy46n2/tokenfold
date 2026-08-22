@@ -18,6 +18,7 @@ Returns (encoded_messages, EncodeReport).
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -29,6 +30,8 @@ from .session import Session, session_id_for
 from ..tokenizers.registry import profile_for
 
 TERSE_STYLE = "Reply terse, no preamble/summary. Code/paths/numbers exact."
+
+_CLAUSE_SPLIT = re.compile(r"[;]|(?<=[.!?])\s+")
 
 
 @dataclass
@@ -482,9 +485,20 @@ class Encoder:
                 alias_best, alias_tok = restored, tok
                 best_rep, best_conf, best_fails = rep, v.confidence, v.failures
 
-        # learning: feed recurring clauses to the nursery
+        # learning: feed recurring clauses to the nursery. Semicolon-only splitting
+        # means a phrase can never be recognized as recurring content unless it's
+        # written as a semicolon-separated imperative (this project's own documented
+        # target style, docs/foldlang.md: "Clauses separated by ;") -- a consumer
+        # whose real repeated boilerplate is normal grammatical prose (complete
+        # sentences, no semicolons at all) gets zero observations no matter how many
+        # times that exact text repeats. Confirmed live (agent-manager integration,
+        # 2026-08-21): 40 identical repeats of a real ~1500-char instructional block in
+        # one session, nursery count never moved from its starting value. Adding
+        # sentence-boundary splitting alongside the semicolon split (same regex shape
+        # folding.py's own fold_turn() already uses for a related purpose) lets a real
+        # repeated SENTENCE be observed too, not just a semicolon-joined clause.
         if role in ("user", "system"):
-            for clause in [c.strip() for c in terse_skel.split(";") if len(c.strip()) > 15]:
+            for clause in [c.strip() for c in _CLAUSE_SPLIT.split(terse_skel) if len(c.strip()) > 15]:
                 if "⟦" not in clause:
                     self.dict.observe(clause, prof.count(clause))
             self.dict.save()
@@ -492,6 +506,23 @@ class Encoder:
         return noalias_best, alias_best, best_rep, best_conf, best_fails
 
     # ------------------------------------------------------------------
+    # Bug (found live, agent-manager integration 2026-08-21): the old version replaced
+    # codes one at a time with str.replace(), first for K/P codes (dict iteration =
+    # insertion/mint order, so short codes always come first) then for E-codes in a
+    # SEPARATE second loop. Either loop corrupts output the moment its code family holds
+    # more than 9 entries: "K4" is a literal substring of "K40", "K400", etc. (same for
+    # "E1" inside "E10"), so an early replace mangles every later, longer code sharing
+    # that prefix before its own turn comes -- "K400" becomes "<K4's expansion>00", not
+    # "<K400's expansion>". Confirmed live for K-codes: a real request decoded to
+    # unrelated seed-phrase text with stray digit fragments ("...after changes00
+    # preserve existing behavior82..."), caught by the verifier and correctly discarded
+    # (no corrupted prompt reached a model), but it silently zeroed the alias mechanism's
+    # entire benefit for any dictionary bigger than single digits -- the normal size
+    # after even light real use. E-codes have the identical latent bug, just not yet hit
+    # in practice because a session accumulates entities slower than dictionary codes.
+    # Decoder.decode() (decoder.py) already handles K/P/E codes correctly with one
+    # word-bounded regex pass; this merges entity names into the same expansions map and
+    # reuses that exact approach instead of two divergent, both-broken loops.
     @staticmethod
     def _expand_codes(text: str, expansions: dict[str, str], session: Session) -> str:
         # Must expand exactly the way the real Decoder does: whole codes at

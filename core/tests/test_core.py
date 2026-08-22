@@ -16,7 +16,7 @@ from tokenfold.core.config import Config  # noqa: E402
 from tokenfold.core.decoder import Decoder, StreamDecoder  # noqa: E402
 from tokenfold.core.dictionary import Dictionary  # noqa: E402
 from tokenfold.core.encoder import Encoder  # noqa: E402
-from tokenfold.core.session import Session  # noqa: E402
+from tokenfold.core.session import Entity, Session  # noqa: E402
 
 
 # ---------------------------------------------------------------- protected
@@ -148,6 +148,33 @@ def test_stream_decoder_handles_split_codes():
     assert out == "first run the full test suite then done. "
 
 
+def test_encoder_expand_codes_does_not_corrupt_longer_codes_sharing_a_prefix():
+    # Regression: Encoder._expand_codes used to str.replace() codes one at a time in
+    # dict-insertion order, so "K4" (inserted early) matched as a literal substring
+    # inside "K40", "K400", etc. (inserted later) and mangled them -- "K400" decoded to
+    # K4's expansion plus a stray "00", not K400's own expansion. A single word-bounded
+    # regex pass (matching the pattern Decoder.decode() already uses correctly) makes
+    # this substring collision impossible regardless of how many codes exist or what
+    # order they were minted in.
+    expansions = {"K4": "run the full test suite after changes",
+                  "K40": "SENTINEL FORTY", "K400": "SENTINEL FOUR HUNDRED"}
+    session = Session("t-expand-collision")
+    out = Encoder._expand_codes("K400 K40 K4", expansions, session)
+    assert out == "SENTINEL FOUR HUNDRED SENTINEL FORTY run the full test suite after changes"
+
+
+def test_encoder_expand_codes_entity_codes_do_not_corrupt_longer_entity_codes():
+    # Same collision class, the E-code (session entity) side: a separate naive
+    # str.replace() loop for entities had the identical bug -- "E1" is a literal
+    # substring of "E10". Not yet hit in practice (a session accumulates entities
+    # slower than dictionary codes) but structurally the same landmine.
+    session = Session("t-expand-entity-collision")
+    for i in range(1, 12):
+        session.entities[f"E{i}"] = Entity(code=f"E{i}", name=f"SENTINEL {i}")
+    out = Encoder._expand_codes("E10 E1", {}, session)
+    assert out == "SENTINEL 10 SENTINEL 1"
+
+
 # ---------------------------------------------------------------- encoder
 def _cfg(**kw) -> Config:
     base = dict(mode="BALANCED", inject_bootstrap=False,
@@ -212,6 +239,26 @@ def test_encoder_digests_old_turns():
     # old turns absorbed into one digest; the key line survives in it
     assert "error: cache miss was the bug" in joined
     assert len(out) < len(msgs)
+
+
+def test_encoder_learns_repeated_prose_sentences_not_just_semicolon_clauses():
+    # Regression: the nursery-learning step used to split only on ";", per this
+    # project's own documented FoldLang target style (docs/foldlang.md: "Clauses
+    # separated by ;"). A caller whose real repeated boilerplate is normal
+    # grammatical prose -- complete sentences, no semicolons -- got zero nursery
+    # observations no matter how many times that exact text repeated. Confirmed live
+    # (agent-manager integration): 40 identical repeats of a real instructional
+    # sentence never moved the nursery count. Sentence-boundary splitting alongside
+    # the semicolon split fixes this without changing FoldLang-style input at all.
+    d = Dictionary(scope="t-prose-learn", path=Path(_tmp) / "t-prose-learn.json")
+    enc = Encoder(_cfg(inject_bootstrap=False), dictionary=d)
+    sentence = "A deterministic scanner flagged a possible issue in this project."
+    msg = [{"role": "user", "content": sentence + " Please look at it."}]
+    for _ in range(3):
+        enc.encode(msg, "gpt-4o")
+    key = sentence.strip().lower()
+    assert key in d.nursery
+    assert d.nursery[key]["count"] >= 3
 
 
 def test_encoder_fail_soft(monkeypatch):
@@ -513,3 +560,29 @@ def test_entity_alias_pass_respects_word_boundaries():
         out = enc._alias_pass("The Agent Managers shipped it", s)
         assert "s" in out  # plural survives
         assert "E" not in out or "Managers" in out or "E1s" not in out, out
+
+
+# ------------------------------------------------------------- engine cache
+def test_engine_cache_does_not_leak_across_sessions(tmp_path, monkeypatch):
+    # Regression: Engine.encode()'s response cache key never included session_id, so
+    # two DIFFERENT sessions sending byte-identical single-message content got the
+    # same cache entry -- and a cache hit skips self.encoder.encode() entirely, which
+    # is the only place session.save() (turn/used_codes) happens. Confirmed live
+    # (agent-manager integration): repeated identical prompts across separate calls
+    # all returned session_id="cache", silently starving whichever session hit the
+    # cache of the turn increments the session-continuity mechanism depends on.
+    from tokenfold.engine import Engine
+    monkeypatch.setenv("TOKENFOLD_HOME", str(tmp_path))
+    eng = Engine(_cfg(inject_bootstrap=False))
+    msg = [{"role": "user", "content": "Please analyze this and that carefully."}]
+
+    eng.encode(msg, "gpt-4o", session_id="session-a")
+    out_a2, rep_a2 = eng.encode(msg, "gpt-4o", session_id="session-a")
+    assert rep_a2.session_id == "cache"          # same session, second call: cache hit
+
+    out_b, rep_b = eng.encode(msg, "gpt-4o", session_id="session-b")
+    assert rep_b.session_id != "cache"            # different session: must NOT hit
+    assert rep_b.session_id == "session-b"
+
+    from tokenfold.core.session import Session
+    assert Session("session-b").turn >= 1         # session-b's own state actually advanced
