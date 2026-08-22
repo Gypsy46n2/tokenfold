@@ -75,13 +75,14 @@ class Encoder:
 
     # ------------------------------------------------------------------
     def encode(self, messages: list[dict], model: str,
-               session_id: str | None = None) -> tuple[list[dict], EncodeReport]:
+               session_id: str | None = None,
+               provider: str = "") -> tuple[list[dict], EncodeReport]:
         t0 = time.perf_counter()
         prof = profile_for(model)
         report = EncodeReport(session_id="", model=model, profile=prof.name,
                               exact_tokenizer=prof.exact)
         try:
-            return self._encode(messages, model, prof, report, t0, session_id)
+            return self._encode(messages, model, prof, report, t0, session_id, provider)
         except Exception:
             # FAILURE BEHAVIOR: passthrough, always.
             report.fallback = True
@@ -105,7 +106,8 @@ class Encoder:
     # ------------------------------------------------------------------
     def _encode(self, messages: list[dict], model: str, prof,
                 report: EncodeReport, t0: float,
-                session_id: str | None = None) -> tuple[list[dict], EncodeReport]:
+                session_id: str | None = None,
+                provider: str = "") -> tuple[list[dict], EncodeReport]:
         cfg = self.cfg
         sid = session_id or session_id_for(messages)
         report.session_id = sid
@@ -290,8 +292,28 @@ class Encoder:
         from .session import content_hash
         block_hash = content_hash(block) if block else ""
         eff_overhead = overhead
-        if block and (block_hash == session.last_inject_hash
-                      or session.turn >= 2):
+        # Bug (found scanning for more agent-manager blockers, 2026-08-21): this discount
+        # applied unconditionally, but it's only economically real for a provider with
+        # actual prompt-prefix caching (e.g. Anthropic's cache_control) -- a plain
+        # stateless HTTP upstream (Ollama, this pipeline's entire real traffic) re-reads
+        # the full injection block byte-for-byte on every single call regardless of
+        # session.turn or whether the exact block was sent before; there is no mechanism
+        # backing the "amortizes over future turns" assumption for it at all. That let
+        # the total-cost decision below pick the alias path using an artificially cheap
+        # eff_overhead, only for the honest absolute-invariant check further down (which
+        # correctly uses the REAL, undiscounted overhead) to catch the mismatch and
+        # revert everything -- confirmed live against real agent-manager traffic: an
+        # observability_fix prompt whose alias substitution genuinely matched 9
+        # established codes (1574->1371 tokens, 203 saved) still reverted to the full
+        # original every time, because the honest glossary cost for those 9 codes (292
+        # tokens) exceeded the raw savings, and the discount-driven decision kept
+        # attempting it anyway -- 99.3% fallback rate on that task type, not a cold-start
+        # symptom (its dictionary already had 656 established codes). Gating on
+        # provider != "ollama" keeps every other caller's existing behavior (including
+        # this file's own tests, which never pass a provider) while making decisions
+        # honest for the one provider we know for certain never caches.
+        if block and provider != "ollama" and (block_hash == session.last_inject_hash
+                                                or session.turn >= 2):
             # already-cached block, or a proven multi-turn session where the
             # one-time send amortizes over future turns: judge at steady-state
             # (discounted) cost. One-shot requests stay at face value.

@@ -101,7 +101,7 @@ class Engine:
                     return out, report
                 except Exception:
                     pass
-        out, report = enc.encode(messages, model, session_id=session_id)
+        out, report = enc.encode(messages, model, session_id=session_id, provider=provider)
         self.metrics.record(report, direction="in", provider=provider,
                             project=scope or self.cfg.scope)
         # opportunistic dictionary learning: try minting a new generation every 25
