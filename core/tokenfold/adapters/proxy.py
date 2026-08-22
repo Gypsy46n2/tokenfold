@@ -52,8 +52,10 @@ def create_app(engine: Engine | None = None) -> FastAPI:
         return {"ok": True, "mode": eng.cfg.mode}
 
     @app.get("/tokenfold/stats")
-    async def stats():
-        return JSONResponse(eng.metrics.summary())
+    async def stats(hours: float | None = None):
+        import time as _time
+        since = (_time.time() - hours * 3600) if hours else None
+        return JSONResponse(eng.metrics.summary(since=since))
 
     @app.get("/tokenfold/dashboard")
     async def dashboard():
@@ -71,10 +73,15 @@ table{{border-collapse:collapse;margin:1rem 0}}td,th{{border:1px solid #8884;
 padding:.3rem .7rem;text-align:left}}h1{{font-size:1.3rem}}
 .big{{font-size:2rem;font-weight:700}}</style>
 <h1>TokenFold — lifetime savings</h1>
-<div class=big>{s['saved']:,} tokens saved ({s['reduction_pct']}%)</div>
+<div class=big>{s['saved_effective']:,} tokens saved ({s['reduction_pct_effective']}%)</div>
+<p>({s['saved']:,} / {s['reduction_pct']}% judging every dictionary block at
+ face value; effective figures amortize byte-identical injection blocks under
+ provider prefix caching)</p>
 <p>{s['n']} requests · original {s['orig']:,} → encoded {s['enc']:,}
- (+{s['overhead']:,} dictionary overhead) · avg encode
- {s['avg_latency']:.1f} ms · fallback rate {s['fallback_pct']:.1f}%</p>
+ (+{s['overhead']:,} dictionary overhead, {s['overhead_effective']:,} effective)
+ · avg encode {s['avg_latency']:.1f} ms</p>
+<p>passthroughs: {s['reverted_pct']:.1f}% not-worth-it (correct economics)
+ · errors {s['error_pct']:.1f}%</p>
 <h2>By model</h2><table><tr><th>model</th><th>reqs</th><th>saved</th>
 <th>avg %</th></tr>{rows_m}</table>
 <h2>By representation</h2><table><tr><th>rep</th><th>reqs</th><th>saved</th>

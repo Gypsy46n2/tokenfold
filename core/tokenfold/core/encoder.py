@@ -18,6 +18,7 @@ Returns (encoded_messages, EncodeReport).
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from dataclasses import dataclass, field
@@ -53,13 +54,24 @@ class EncodeReport:
     original_tokens: int = 0
     encoded_tokens: int = 0
     dictionary_overhead: int = 0
+    # what the injection block really costs THIS request once provider prefix
+    # caching is accounted for (face value on a first ship, discounted on
+    # byte-identical repeats). dictionary_overhead stays face value.
+    effective_overhead: int = 0
     latency_ms: float = 0.0
     fallback: bool = False
+    # "" (no fallback) | "not-worth-it" (invariant shipped the original —
+    # correct economics, not a failure) | "error:<ExcName>" (real failure)
+    fallback_reason: str = ""
     messages: list[MessageReport] = field(default_factory=list)
 
     @property
     def saved(self) -> int:
         return self.original_tokens - self.encoded_tokens - self.dictionary_overhead
+
+    @property
+    def saved_effective(self) -> int:
+        return self.original_tokens - self.encoded_tokens - self.effective_overhead
 
     @property
     def pct(self) -> float:
@@ -82,9 +94,13 @@ class Encoder:
                               exact_tokenizer=prof.exact)
         try:
             return self._encode(messages, model, prof, report, t0, session_id)
-        except Exception:
-            # FAILURE BEHAVIOR: passthrough, always.
+        except Exception as exc:
+            # FAILURE BEHAVIOR: passthrough, always — but never silently:
+            # a real error is a bug to find, not a statistic to shrug at.
+            logging.getLogger("tokenfold.encoder").exception(
+                "encode failed, passing request through untouched")
             report.fallback = True
+            report.fallback_reason = f"error:{type(exc).__name__}"
             report.encoded_tokens = report.original_tokens = self._count_all(messages, prof)
             report.latency_ms = (time.perf_counter() - t0) * 1000
             return messages, report
@@ -115,6 +131,36 @@ class Encoder:
         if cfg.mode == "OFF":
             report.original_tokens = report.encoded_tokens = self._count_all(messages, prof)
             report.latency_ms = (time.perf_counter() - t0) * 1000
+            return messages, report
+
+        # Tiny requests can never clear the min-savings thresholds: the full
+        # pipeline runs only to have the never-larger invariant revert it,
+        # which burned latency AND stamped fallback=True — live metrics showed
+        # a cluster of 5–35 token requests inflating fallback_pct with what is
+        # really just correct "nothing to do here" behavior. Skip early.
+        total_tok = self._count_all(messages, prof)
+        if total_tok < cfg.min_encode_tokens:
+            # Learning must NOT be gated with the pipeline: short boilerplate
+            # repeated across many tiny requests is exactly what the nursery
+            # exists to notice. Same observe step the candidate search runs.
+            for m in messages:
+                if m.get("role") in ("user", "system"):
+                    try:
+                        skel, _regs = protected.extract(self._text(m))
+                        terse = phrases.compress(skel)
+                    except Exception:
+                        continue
+                    for clause in [c.strip() for c in _CLAUSE_SPLIT.split(terse)
+                                   if len(c.strip()) > 15]:
+                        if "⟦" not in clause:
+                            self.dict.observe(clause, prof.count(clause))
+            self.dict.save()
+            report.original_tokens = report.encoded_tokens = total_tok
+            report.messages.append(MessageReport(
+                index=0, representation="small-passthrough",
+                original_tokens=total_tok, encoded_tokens=total_tok))
+            report.latency_ms = (time.perf_counter() - t0) * 1000
+            session.save()          # the turn increment above must still stick
             return messages, report
 
         # observe entities across all user/system text
@@ -353,6 +399,7 @@ class Encoder:
         else:
             report.encoded_tokens = total_alias
             report.dictionary_overhead = overhead
+            report.effective_overhead = eff_overhead
             session.last_inject_hash = block_hash
             digest_text = digest_alias
 
@@ -369,8 +416,10 @@ class Encoder:
             if report.encoded_tokens + eff_overhead \
                     > report.original_tokens:
                 report.fallback = True
+                report.fallback_reason = "not-worth-it"
             report.encoded_tokens = report.original_tokens
             report.dictionary_overhead = 0
+            report.effective_overhead = 0
             out = list(messages)
             inject_parts = []
             digest_text = ""

@@ -15,6 +15,7 @@ class Config:
     min_confidence: float = 0.99       # semantic confidence floor
     min_savings_pct: float = 8.0       # don't bother below this
     min_savings_abs: int = 6           # ...or below this many tokens
+    min_encode_tokens: int = 24        # below this min_savings_abs is unreachable: pass through
     inject_bootstrap: bool = True      # dictionary bootstrap into system prompt
     inject_terse_style: bool = True    # "reply tersely, no preamble" instruction
     fold_history: bool = True

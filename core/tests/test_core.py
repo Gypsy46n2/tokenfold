@@ -679,3 +679,56 @@ def test_engine_decode_uses_the_matching_scope_dictionary():
         == "see an observability-scoped phrase for context"
     assert eng.decode("see K1 for context", "sess", scope="arch_discovery") \
         == "see an arch-discovery-scoped phrase for context"
+
+
+# ------------------------------------------------- fallback accounting
+def test_small_request_passes_through_without_counting_as_fallback():
+    """Tiny requests can never clear min-savings; they must skip the pipeline
+    (no latency burned) and must NOT be stamped fallback — live metrics showed
+    a cluster of 5–35 token requests inflating fallback_pct with what is
+    really correct 'nothing to do here' behavior."""
+    enc = Encoder(Config(mode="MAX"))
+    out, rep = enc.encode([{"role": "user", "content": "hi there"}],
+                          "gpt-4o", session_id="small-req-s")
+    assert out == [{"role": "user", "content": "hi there"}]
+    assert not rep.fallback and rep.fallback_reason == ""
+    assert [m.representation for m in rep.messages] == ["small-passthrough"]
+
+
+def test_encoder_error_fallback_carries_a_reason():
+    """A real error must be distinguishable from an economics revert."""
+    enc = Encoder(Config())
+    orig = enc._encode
+    def boom(*a, **k):
+        raise RuntimeError("synthetic")
+    enc._encode = boom
+    try:
+        out, rep = enc.encode([{"role": "user", "content": "x " * 100}], "gpt-4o")
+    finally:
+        enc._encode = orig
+    assert rep.fallback and rep.fallback_reason == "error:RuntimeError"
+    assert out[0]["content"] == "x " * 100
+
+
+def test_metrics_summary_splits_fallback_and_reports_effective_savings(tmp_path):
+    from tokenfold.core.metrics import Metrics
+    from tokenfold.core.encoder import EncodeReport
+    m = Metrics(path=str(tmp_path / "m.sqlite3"))
+    ok = EncodeReport(session_id="s", model="x", profile="p", exact_tokenizer=True)
+    ok.original_tokens, ok.encoded_tokens = 100, 60
+    ok.dictionary_overhead, ok.effective_overhead = 30, 3
+    m.record(ok)
+    err = EncodeReport(session_id="s", model="x", profile="p", exact_tokenizer=True,
+                       fallback=True, fallback_reason="error:ValueError")
+    err.original_tokens = err.encoded_tokens = 50
+    m.record(err)
+    rev = EncodeReport(session_id="s", model="x", profile="p", exact_tokenizer=True,
+                       fallback=True, fallback_reason="not-worth-it")
+    rev.original_tokens = rev.encoded_tokens = 50
+    m.record(rev)
+    s = m.summary()
+    assert s["n"] == 3
+    assert round(s["error_pct"]) == 33 and round(s["reverted_pct"]) == 33
+    assert s["saved"] == 100 - 60 - 30            # face value
+    assert s["saved_effective"] == 100 - 60 - 3   # prefix-cache aware
+    assert s["overhead_effective"] == 3
