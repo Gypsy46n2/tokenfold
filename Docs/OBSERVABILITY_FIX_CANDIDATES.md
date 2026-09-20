@@ -114,3 +114,26 @@ Import `logging` at module top (stdlib, already permitted by project capabilitie
 
 Benefits:
 Every swallowed exception now produces a single, structured log line with the offending payload fragment and a full traceback, turning an invisible data-corruption path into a diagnosable one. Operators can grep for the logger name to find all folding failures in a given window, correlate them with upstream LLM responses, and confirm whether the fall-through raw-line yield is causing downstream parsing issues. The fix is minimal (one import, one logger line, one `except` body change) and introduces no new runtime dependency or behavioral change to the happy path.
+
+### AC-6 · Silent dictionary reset hides data loss and root cause
+Strength: Strong
+Files: core/tokenfold/core/dictionary.py
+Snippet:
+```
+                self.aliases = {c: Alias(**a) for c, a in raw.get("aliases", {}).items()}
+                self.generations = [Generation(**g) for g in raw.get("generations", [])]
+                self.nursery = raw.get("nursery", {})
+            except Exception:
+                # corrupt dictionary must never block traffic
+                self.aliases, self.generations, self.nursery = {}, [], {}
+
+```
+
+Problem:
+In `_load()`, the `except Exception:` branch resets `self.aliases`, `self.generations`, and `self.nursery` to empty containers with no log, no warning, and no stderr write. The comment "corrupt dictionary must never block traffic" correctly states the intent, but the operator has zero visibility that every learned alias, generation, and nursery entry was discarded. A corrupt file could indicate a partial `save()` (disk full, kill -9 mid-write), a filesystem error, a serialisation bug, or manual tampering; because nothing is recorded, none of these root causes are diagnosable, and the next `save()` overwrites the evidence.
+
+Solution:
+Add `import logging` and `import traceback` at the top of the module (or reuse an existing module-level `logger` if one is already defined). Inside the `except Exception:` block, before the reset assignment, emit a single `logging.getLogger(__name__).warning(...)` call that includes the file path (`self.path`), the exception type and message, and `traceback.format_exc()` so the full stack is captured. The reset-to-empty behaviour and the "never block traffic" contract remain unchanged; the only addition is the one log statement.
+
+Benefits:
+An operator grepping service logs will immediately see a single, identifiable line naming the dictionary file, the exception, and the full traceback, making it possible to diagnose the corruption source (disk, serialisation, tampering) and recover the lost vocabulary from backup. The silent data-loss window is closed without introducing any new dependency, any metrics system, or any change to the recovery semantics.
