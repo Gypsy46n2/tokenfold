@@ -45,3 +45,26 @@ Replace the bare `except Exception` with `except Exception as exc`, emit a `logg
 
 Benefits:
 Once fixed, every malformed or unexpected upstream SSE frame produces a single, greppable log line carrying the model name, session ID, exception class, exception message, and a bounded raw-line excerpt. An operator can immediately distinguish "upstream sent a rate-limit error object" from "a network hiccup truncated the JSON" from "a non-OpenAI provider sent a different schema," and can correlate the event to a specific session. The client no longer receives a potentially non-JSON or partial frame that could corrupt its SSE parser, so end-user completions fail cleanly (missing a token) rather than garbling. The observability gap that made this class of failure invisible in production is closed using only primitives the project already has.
+
+### AC-3 · Silent JSON-parse failure on retry response in proxy adapter
+Strength: Strong
+Files: core/tokenfold/adapters/proxy.py
+Snippet:
+```
+                    r2 = await client.post(upstream, json=retry, headers=headers)
+                    try:
+                        obj = r2.json()
+                    except Exception:
+                        pass
+            for ch in obj.get("choices", []):
+                msg = ch.get("message", {})
+```
+
+Problem:
+Inside the retry branch of the content-expansion path, `r2.json()` is wrapped in `try/except Exception: pass`. If the upstream returns a non-JSON body (an HTML 502 page, a plain-text error, a truncated response), the exception is discarded with no log, no re-raise, and no marker. The variable `obj` silently retains whatever value it held from the initial `r1` parse, and the code then iterates `obj.get("choices", [])` as though the retry had succeeded. In production this means an operator sees a "successful" response that is actually stale data from the first attempt, with zero trace in the logs that the retry round-trip produced an unparseable body. Distinguishing "retry worked" from "retry returned garbage and we fell back" is impossible without adding a log line.
+
+Solution:
+Replace the bare `except Exception: pass` with a handler that logs the failure via the stdlib `logging` module (already the project's Python logging primitive) and then lets `obj` retain its prior value as an intentional fallback. Concretely: `except Exception as exc: logging.getLogger(__name__).warning("Retry response from %s was not valid JSON (%s); falling back to initial response", upstream, exc)`. This preserves the existing control flow (the loop over `obj.get("choices", [])` still runs with the prior `obj`) while giving operators a single, greppable log line that names the upstream URL and the parse error, so a wave of 502 HTML pages from the upstream becomes immediately visible in the log stream. No new dependency is introduced; `logging` is stdlib and is the pattern this codebase already uses for Python-side diagnostics.
+
+Benefits:
+Operators can now distinguish a healthy retry from a silently-failed one by grepping for the warning message. If the upstream begins returning non-JSON error pages (a common failure mode during deploys or rate-limiting), the log spike is visible within seconds rather than being masked by stale-but-valid-looking responses. The fallback-to-prior-`obj` behaviour is preserved, so no caller contract changes, but the decision is now explicit and auditable rather than an invisible `pass`.
