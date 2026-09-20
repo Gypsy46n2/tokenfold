@@ -68,3 +68,26 @@ Replace the bare `except Exception: pass` with a handler that logs the failure v
 
 Benefits:
 Operators can now distinguish a healthy retry from a silently-failed one by grepping for the warning message. If the upstream begins returning non-JSON error pages (a common failure mode during deploys or rate-limiting), the log spike is visible within seconds rather than being masked by stale-but-valid-looking responses. The fallback-to-prior-`obj` behaviour is preserved, so no caller contract changes, but the decision is now explicit and auditable rather than an invisible `pass`.
+
+### AC-4 · Silent config-load fallback hides parse and I/O failures
+Strength: Strong
+Files: core/tokenfold/core/config.py
+Snippet:
+```
+        try:
+            return Config(**{**asdict(Config()),
+                             **json.loads(p.read_text(encoding="utf-8"))}).clamp()
+        except Exception:
+            pass
+    return Config()
+
+```
+
+Problem:
+The `load()` function in `core/tokenfold/core/config.py` wraps the JSON parse and `Config` construction in a bare `except Exception: pass`. Any failure—malformed JSON (trailing comma, wrong type), a `PermissionError` on a read-only mount, a `FileNotFoundError` that slips past the `p.exists()` check via TOCTOU, or a `TypeError` from an unexpected key—is swallowed with zero diagnostic output. The subsequent `return Config()` is the same happy-path default returned when the file simply does not exist, so no caller, operator, or log consumer can distinguish "no config file" from "config file was present but unparseable." In a multi-node deployment a partial write or disk fault corrupts the file and every node silently reverts to defaults; the operator sees degraded routing (e.g. `route_mode` falling back to `"human"`) with no log line pointing at the cause.
+
+Solution:
+Bind the caught exception (`except Exception as exc`) and emit a single `logging.warning` call inside the `except` block that names the resolved config path `p` and the concrete exception (`exc`). Keep the existing `return Config()` fallback unchanged so the "always return a valid Config" contract is preserved. Add `import logging` at the top of the module if it is not already present. No new dependency, no metrics, no re-raise—just one greppable warning line that tells an operator exactly which file failed and why.
+
+Benefits:
+An operator or user who accidentally leaves a stray comma in `config.json` (or whose file is corrupted by a partial write) now sees a single, greppable warning line in the log naming the file path and the specific exception type and message. This turns an invisible, silent fallback into a one-line diagnostic that is immediately actionable, eliminates the ambiguity between "file absent" and "file present but broken," and requires no new dependency or infrastructure—only the stdlib `logging` module the project already uses.
