@@ -22,3 +22,26 @@ Replace the bare `except Exception: pass` with an `except Exception as exc` hand
 
 Benefits:
 An operator debugging a misbehaving upstream now sees a timestamped warning with the HTTP status code and full traceback in the application log, can distinguish "retry body was garbage" from "retry succeeded but content was unexpected," and the HTTP client receives an explicit 502-class error instead of a silently-wrong 200 built from the first response. The `NameError` edge case is eliminated because the function returns before reaching the `obj.get(...)` line. No new dependency is introduced; the fix uses only `logging` (stdlib) and the existing `JSONResponse` return type already present in the file.
+
+### AC-2 · Silent `except Exception` in SSE delta parser drops all diagnostic context
+Strength: Strong
+Files: core/tokenfold/adapters/proxy.py
+Snippet:
+```
+                        try:
+                            obj = json.loads(payload)
+                            delta = obj["choices"][0]["delta"].get("content")
+                        except Exception:
+                            yield (line + "\n\n").encode()
+                            continue
+                        if delta:
+```
+
+Problem:
+In the streaming SSE handler, the `try` block that parses each upstream `data:` payload (`json.loads(payload)` followed by the `obj["choices"][0]["delta"].get("content")` chain) is guarded by a bare `except Exception` that does two things: it yields the raw line verbatim to the client and then `continue`s. No log is emitted, no exception type or message is captured, and no caller-visible signal is produced. Because the except clause is a catch-all `Exception`, it silently absorbs `json.JSONDecodeError` (truncated or non-JSON upstream frames), `KeyError` (an upstream error object, a `usage`-only frame, or any non-OpenAI-shaped payload), and `TypeError` (a `None` or list where a dict is expected). In production, a sustained upstream degradation—rate-limit error objects, a proxy in front of the model emitting keepalive comments as `data:` lines, or a transient TCP truncation—produces zero server-side evidence. An operator investigating "why did the client get garbled output?" has no log line to grep, no correlation ID, and no way to distinguish a malformed frame from a valid one. The forwarded raw line may also be non-JSON or a partial frame, which can break the client's SSE/JSON parser and produce truncated or garbled completions rather than a clean, attributable error.
+
+Solution:
+Replace the bare `except Exception` with `except Exception as exc`, emit a `logger.warning` call (using the stdlib `logging` module the project already uses) that records the exception type and message, the `model` and `sid` values already in scope, and a truncated copy of the raw line (first ~200 chars) for post-hoc inspection. After logging, `continue` to skip the malformed frame rather than forwarding it to the client, because the downstream decoder (`sd.feed`) expects a clean delta string and the client's SSE parser expects well-formed `data:` JSON; a dropped frame is far less damaging than a corrupted one, and the normal path still terminates with `data: [DONE]`. No metric or counter is added because this project has no metrics system; the stdlib log line is the correct and only available primitive.
+
+Benefits:
+Once fixed, every malformed or unexpected upstream SSE frame produces a single, greppable log line carrying the model name, session ID, exception class, exception message, and a bounded raw-line excerpt. An operator can immediately distinguish "upstream sent a rate-limit error object" from "a network hiccup truncated the JSON" from "a non-OpenAI provider sent a different schema," and can correlate the event to a specific session. The client no longer receives a potentially non-JSON or partial frame that could corrupt its SSE parser, so end-user completions fail cleanly (missing a token) rather than garbling. The observability gap that made this class of failure invisible in production is closed using only primitives the project already has.
