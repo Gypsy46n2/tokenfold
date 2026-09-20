@@ -91,3 +91,26 @@ Bind the caught exception (`except Exception as exc`) and emit a single `logging
 
 Benefits:
 An operator or user who accidentally leaves a stray comma in `config.json` (or whose file is corrupted by a partial write) now sees a single, greppable warning line in the log naming the file path and the specific exception type and message. This turns an invisible, silent fallback into a one-line diagnostic that is immediately actionable, eliminates the ambiguity between "file absent" and "file present but broken," and requires no new dependency or infrastructure—only the stdlib `logging` module the project already uses.
+
+### AC-5 · Silent exception swallow in SSE token-fold proxy loop
+Strength: Strong
+Files: core/tokenfold/adapters/proxy.py
+Snippet:
+```
+                                    obj["delta"]["text"] = piece
+                                    yield ("data: " + json.dumps(obj) + "\n\n").encode()
+                                    continue
+                            except Exception:
+                                pass
+                        yield (line + "\n").encode() if line else b"\n"
+                    tail = sd.flush()
+```
+
+Problem:
+Inside the `async for line in r.aiter_lines()` loop, the `try` block performs `json.loads`, a chained `.get()` access, `sd.feed()`, and `json.dumps`. Any failure in that chain (malformed JSON from the upstream LLM, a missing key if the payload shape shifts, an internal error in `sd.feed`) is caught by `except Exception: pass`, which discards the exception object entirely. Control then falls through to `yield (line + "\n").encode()`, emitting the raw `data:`-prefixed line to the downstream SSE consumer instead of the token-folded content. The operator receives no log line, no traceback, and no indication that the folding step failed, making the resulting stream corruption (duplicate or un-folded tokens, broken SSE framing) effectively undiagnosable in production.
+
+Solution:
+Import `logging` at module top (stdlib, already permitted by project capabilities) and create `logger = logging.getLogger(__name__)`. Replace the bare `pass` in the `except` clause with `logger.error("tokenfold proxy: failed to process SSE line %r: %s", line[:120], exc, exc_info=True)`. This captures the offending line (truncated to avoid log bloat), the exception type and message, and the full traceback. The existing fall-through `yield` is preserved so the stream does not stall, but the operator now has a concrete, greppable log entry to diagnose the root cause. No new dependency is introduced; `logging` is part of the Python standard library.
+
+Benefits:
+Every swallowed exception now produces a single, structured log line with the offending payload fragment and a full traceback, turning an invisible data-corruption path into a diagnosable one. Operators can grep for the logger name to find all folding failures in a given window, correlate them with upstream LLM responses, and confirm whether the fall-through raw-line yield is causing downstream parsing issues. The fix is minimal (one import, one logger line, one `except` body change) and introduces no new runtime dependency or behavioral change to the happy path.
