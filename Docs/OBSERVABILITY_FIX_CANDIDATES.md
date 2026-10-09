@@ -137,3 +137,26 @@ Add `import logging` and `import traceback` at the top of the module (or reuse a
 
 Benefits:
 An operator grepping service logs will immediately see a single, identifiable line naming the dictionary file, the exception, and the full traceback, making it possible to diagnose the corruption source (disk, serialisation, tampering) and recover the lost vocabulary from backup. The silent data-loss window is closed without introducing any new dependency, any metrics system, or any change to the recovery semantics.
+
+### AC-7 · Silent JSON-parse failure in Ollama retry path
+Strength: Strong
+Files: core/tokenfold/adapters/ollama_native.py
+Snippet:
+```
+                    r2 = await client.post(upstream, json=retry, headers=headers)
+                    try:
+                        obj = r2.json()
+                    except Exception:
+                        pass
+            if isinstance(obj.get("response"), str):
+                raw_txt = obj["response"]
+```
+
+Problem:
+In the retry branch of the Ollama native adapter, after `r2 = await client.post(upstream, json=retry, headers=headers)` the code wraps `obj = r2.json()` in a bare `try/except Exception: pass`. If the upstream returns a non-JSON body (HTML error page, truncated stream, plain-text message), the parse exception is caught and discarded with no log line, no re-raise, and no metric. Execution then falls through to `if isinstance(obj.get("response"), str):` where `obj` still holds whatever value it had before the retry (or is unbound on first pass), so the caller receives a `JSONResponse` built from stale or undefined data while the real parse failure is completely invisible to operators.
+
+Solution:
+Replace the bare `except Exception: pass` with an `except Exception as exc:` clause that calls `logging.getLogger(__name__).error("Failed to parse Ollama retry response as JSON (status=%s, upstream=%s): %s", r2.status_code, upstream, exc, exc_info=True)` and then `raise` the exception so the outer `except Exception:` handler (already present at the end of the shown block) can return a proper error response to the client. Add `import logging` at the top of the module if not already present. No new dependency is introduced; `logging` is the Python stdlib primitive this project uses for Python-side diagnostics.
+
+Benefits:
+Operators gain a single, greppable log line with the upstream URL, HTTP status code, the exception message, and a full traceback (`exc_info=True`) the moment a retry response is malformed, turning an invisible silent failure into a diagnosable event. Because the exception is re-raised, the existing outer handler returns a well-formed error to the caller instead of serving stale or undefined data, eliminating the risk of a downstream consumer receiving a `JSONResponse` whose `obj` was never actually populated by the retry call.
