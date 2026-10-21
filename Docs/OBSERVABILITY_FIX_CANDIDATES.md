@@ -160,3 +160,26 @@ Replace the bare `except Exception: pass` with an `except Exception as exc:` cla
 
 Benefits:
 Operators gain a single, greppable log line with the upstream URL, HTTP status code, the exception message, and a full traceback (`exc_info=True`) the moment a retry response is malformed, turning an invisible silent failure into a diagnosable event. Because the exception is re-raised, the existing outer handler returns a well-formed error to the caller instead of serving stale or undefined data, eliminating the risk of a downstream consumer receiving a `JSONResponse` whose `obj` was never actually populated by the retry call.
+
+### AC-8 · Silent exception swallow in terse-compress step hides persistent pipeline failure
+Strength: Strong
+Files: core/tokenfold/core/encoder.py
+Snippet:
+```
+            try:
+                skel, regs = protected.extract(ln)
+                ln = protected.restore(phrases.compress(skel), regs).strip()
+            except Exception:
+                pass
+            if len(ln) > 240:               # word-boundary truncation
+                cut = ln.rfind(" ", 0, 237)
+```
+
+Problem:
+In the digest-entry loop, the terse-compress step wraps `protected.extract(ln)` and `phrases.compress(skel)` in a bare `except Exception: pass`. If either call raises—due to a malformed input shape, a regex backtracking blowup, or a bug introduced in `protected` or `phrases`—the exception is discarded with no log, no counter, and no trace. The code then falls through to the 240-char truncation and dedup logic using the *uncompressed* line, so the pipeline still "works," but the compression is silently skipped for every subsequent line. Because the project has no metrics or telemetry system, the only way to discover that the compression step is broken for all inputs would be to manually inspect `session.digest_entries` and notice they are longer than expected, then trace back to this block. A one-off transient error is tolerable; a persistent one is not, and today neither is visible.
+
+Solution:
+Replace the bare `except Exception: pass` with a handler that logs a warning via the Python stdlib `logging` module (already the project's sanctioned logging primitive for Python code) before falling back to the original line. Concretely: at module top, ensure `import logging` and `logger = logging.getLogger(__name__)`. In the except clause, call `logger.warning("terse-compress failed for line (len=%d): %s", len(ln), e, exc_info=True)` and then let `ln` retain its pre-`try` value (the original uncompressed line), preserving the existing graceful-degradation behavior. No rethrow is needed because the caller's contract is "store a best-effort compressed line"; the fallback is the intended recovery path. The `exc_info=True` argument ensures the full traceback is captured so a developer can identify whether the failure is in `extract`, `compress`, or `restore` without reproducing the input.
+
+Benefits:
+A persistent regression in the compression pipeline (e.g., a bad regex added to `protected.extract`) becomes immediately visible in application logs as a repeating warning with a full traceback, rather than silently degrading every digest entry to its uncompressed form. Operators and developers can distinguish a one-off transient error from a systemic break by the warning frequency, and the `exc_info` traceback points directly at the offending call. Because the fix uses only the stdlib `logging` module already sanctioned for this project, it introduces no new dependency and no new telemetry surface.
