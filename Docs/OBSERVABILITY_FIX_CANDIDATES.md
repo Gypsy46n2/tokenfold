@@ -229,3 +229,26 @@ Replace the bare `pass` with a single `logging.warning` call that captures the e
 
 Benefits:
 Once the warning is in place, any operator tailing the application log (or a log aggregator) immediately sees the failure, the exact exception type and message, the full traceback, and the `key` that correlates the failure to a specific session/fold request. A permanently broken LLM path—expired token, mistyped model name, upstream 500—becomes visible within seconds of the first failed call instead of remaining invisible until someone manually inspects folds. The fix adds zero runtime cost on the success path, introduces no new dependency, and preserves the existing fallback contract exactly.
+
+### AC-11 · Silent deserialization failure in session restore
+Strength: Strong
+Files: core/tokenfold/core/session.py
+Snippet:
+```
+                self.last_inject_hash = raw.get("last_inject_hash", "")
+                self.pending_expansions = raw.get("pending_expansions", [])
+                self.turn = raw.get("turn", 0)
+            except Exception:
+                pass
+
+    def save(self) -> None:
+```
+
+Problem:
+The `except Exception: pass` block at the tail of the session-restore method (lines 81-82) swallows every possible failure during hydration of `self.entities`, `self.folds`, `self.digested`, `self.turn`, and related fields from the `raw` dict. A corrupt JSON file, a schema drift (a new required kwarg in `Entity(**e)` or `Fold(**f)`), a `TypeError` from a type mismatch, or a `KeyError` from a missing sub-dict all result in the object silently falling back to its `__init__` defaults. The user's accumulated session state is lost with zero diagnostic output—no log line, no stderr write, no re-raise—making the failure invisible to both operators and developers.
+
+Solution:
+Add `import logging` at the top of the module (if not already present) and a module-level `logger = logging.getLogger(__name__)`. Replace the bare `pass` inside the `except Exception:` clause with `logger.warning("Failed to restore session state from %s; falling back to defaults.", self.path, exc_info=True)`. This preserves the existing best-effort-restore control flow (the caller still gets a usable object with defaults), while emitting a single warning-level log line carrying the full traceback so the root cause is traceable. No new dependency, no metrics, no re-raise—only the stdlib `logging` module the project already permits for Python code.
+
+Benefits:
+Any future deserialization failure—whether from a schema change, a truncated file, or a coding error—produces an immediately visible, searchable log entry with a full stack trace. A developer debugging "why did my session reset?" or an operator noticing vanished folds can identify the exact exception and the offending field within seconds instead of discovering the issue through indirect symptoms. The fallback-to-defaults operational behaviour is unchanged, so no caller contract is broken.
