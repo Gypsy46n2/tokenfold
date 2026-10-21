@@ -206,3 +206,26 @@ Replace the bare `pass` with a single `logging.warning` call that captures the f
 
 Benefits:
 A one-off network blip becomes a single greppable warning line with a full traceback, distinguishable from a persistent schema mismatch that would produce the same warning repeatedly. An operator can correlate the `key` and `session.id` in the log to the specific in-flight task and the affected session. The "don't crash the worker on a transient LLM hiccup" intent is fully preserved — the exception is still caught and the `finally` still cleans up — but the failure is no longer invisible.
+
+### AC-10 · Log the swallowed abstractive-fold failure instead of bare `pass`
+Strength: Strong
+Files: core/tokenfold/core/folding.py
+Snippet:
+```
+                session.folds.append(Fold(start=start, end=end, summary=summary,
+                                          kind="abstractive"))
+                session.save()
+        except Exception:
+            pass                          # extractive fold remains in use
+        finally:
+            self._inflight.discard(key)
+```
+
+Problem:
+The `except Exception: pass` block that guards the abstractive-fold HTTP POST (to `/api/generate`) discards every possible failure—network timeout, HTTP 5xx, malformed JSON, expired auth, wrong model name—with no log line, no stderr write, and no other trace. The fallback semantics are correct (the extractive fold stays, `self._inflight.discard(key)` still runs in `finally`), so the code is not a correctness bug. But the operational consequence is that if the LLM endpoint goes down or the configuration drifts, abstractive folding silently and permanently stops producing `kind="abstractive"` folds. An operator has no signal whatsoever; they would only discover the outage by manually diffing session folds over days. The project already has the stdlib `logging` module available for its Python code path, so the fix costs one statement and introduces no new dependency.
+
+Solution:
+Replace the bare `pass` with a single `logging.warning` call that captures the exception object (with `exc_info=True` for a full traceback in the log record) and the `key` that identifies the specific fold request, while leaving the `finally` block and the no-rethrow fallback contract untouched. Concretely, bind the exception (`except Exception as exc:`), emit `logging.warning("Abstractive fold failed for key=%r; keeping extractive fold. Error: %s", key, exc, exc_info=True)`, then keep the existing comment and `finally: self._inflight.discard(key)`. No new imports beyond the already-available `logging` module; no metrics, no re-raise, no change to the session or fold state.
+
+Benefits:
+Once the warning is in place, any operator tailing the application log (or a log aggregator) immediately sees the failure, the exact exception type and message, the full traceback, and the `key` that correlates the failure to a specific session/fold request. A permanently broken LLM path—expired token, mistyped model name, upstream 500—becomes visible within seconds of the first failed call instead of remaining invisible until someone manually inspects folds. The fix adds zero runtime cost on the success path, introduces no new dependency, and preserves the existing fallback contract exactly.
