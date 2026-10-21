@@ -183,3 +183,26 @@ Replace the bare `except Exception: pass` with a handler that logs a warning via
 
 Benefits:
 A persistent regression in the compression pipeline (e.g., a bad regex added to `protected.extract`) becomes immediately visible in application logs as a repeating warning with a full traceback, rather than silently degrading every digest entry to its uncompressed form. Operators and developers can distinguish a one-off transient error from a systemic break by the warning frequency, and the `exc_info` traceback points directly at the offending call. Because the fix uses only the stdlib `logging` module already sanctioned for this project, it introduces no new dependency and no new telemetry surface.
+
+### AC-9 · Swallowed exception in best-effort summarisation has no log signal
+Strength: Strong
+Files: core/tokenfold/core/folding.py
+Snippet:
+```
+                if len(cur.digest_entries) >= len(session.digest_entries):
+                    cur.digest_entries = fresh + cur.digest_entries[len(old):]
+                    cur.save()
+        except Exception:
+            pass
+        finally:
+            self._inflight.discard(key)
+```
+
+Problem:
+The `except Exception: pass` at the tail of the summarisation `try` block discards every possible failure — an HTTP 500/429 from the model endpoint, a malformed JSON body, a `KeyError` if the response shape changes, a transient DB lock on `cur.save()`, or a schema drift in `r.json()` — with zero trace. Because the enclosing `_work` method returns `None` and the task is fire-and-forget, no caller can inspect a return value or catch the exception. The `finally` clause correctly cleans up `_inflight`, but the only place a human could learn the summarisation is failing is a log line, and there is none. If the model endpoint renames its `"response"` key or the API key rotates, every subsequent call silently enters the `except`, hits `pass`, and the session's digest entries are never summarised again — no alert, no log, no metric.
+
+Solution:
+Replace the bare `pass` with a single `logging.warning` call that captures the full traceback via `exc_info=True` and includes the `key` and `session.id` for operator correlation. The `finally` block and `_inflight.discard(key)` remain unchanged. No re-raise is needed because the task is explicitly best-effort and the caller has no contract to fulfil. No metrics, counters, or health signals are added because the project has no metrics system; the stdlib `logging` module (already the project's logging mechanism) is the sole primitive used.
+
+Benefits:
+A one-off network blip becomes a single greppable warning line with a full traceback, distinguishable from a persistent schema mismatch that would produce the same warning repeatedly. An operator can correlate the `key` and `session.id` in the log to the specific in-flight task and the affected session. The "don't crash the worker on a transient LLM hiccup" intent is fully preserved — the exception is still caught and the `finally` still cleans up — but the failure is no longer invisible.
