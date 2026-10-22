@@ -252,3 +252,26 @@ Add `import logging` at the top of the module (if not already present) and a mod
 
 Benefits:
 Any future deserialization failure—whether from a schema change, a truncated file, or a coding error—produces an immediately visible, searchable log entry with a full stack trace. A developer debugging "why did my session reset?" or an operator noticing vanished folds can identify the exact exception and the offending field within seconds instead of discovering the issue through indirect symptoms. The fallback-to-defaults operational behaviour is unchanged, so no caller contract is broken.
+
+### AC-12 · Swallowed Dictionary Mint Failure Without Logging
+Strength: Strong
+Files: core/tokenfold/engine.py
+Snippet:
+```
+            self._since_mint[mint_key] = 0
+            try:
+                enc.dict.mint()
+            except Exception:
+                pass
+        if cache_key and not report.fallback:
+            self.metrics.cache_put(cache_key, json.dumps(out, ensure_ascii=False),
+```
+
+Problem:  
+The `try` block around `enc.dict.mint()` silently catches any exception — including I/O errors, model corruption, or internal state inconsistencies — and does nothing with it. There is no logging, no re-raising, and no metric to alert operators or developers. This makes failures invisible, allowing the system to continue operating with an invalid dictionary state, which may lead to silent data corruption or incorrect encoding. Since the project has no metrics system, no telemetry can be emitted — and since no third-party logging is available, only stdlib `logging` can be used to make failures visible.
+
+Solution:  
+Replace the `except Exception: pass` block with a logging statement that records the exception with context: scope, function, and error message. This ensures the failure is visible and diagnosable without altering the function’s contract or introducing metrics.
+
+Benefits:  
+Once fixed, operators can detect dictionary mint failures via logs, enabling faster diagnosis and recovery. The system remains functionally unchanged — it still returns `(out, report)` — but failures are no longer silently swallowed, reducing the risk of undetected data corruption or cascading failures.
