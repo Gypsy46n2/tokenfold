@@ -275,3 +275,34 @@ Replace the `except Exception: pass` block with a logging statement that records
 
 Benefits:  
 Once fixed, operators can detect dictionary mint failures via logs, enabling faster diagnosis and recovery. The system remains functionally unchanged — it still returns `(out, report)` — but failures are no longer silently swallowed, reducing the risk of undetected data corruption or cascading failures.
+
+### AC-13 · Silent Exception Swallowed in Metrics Recording Path
+Strength: Strong
+Files: core/tokenfold/engine.py
+Snippet:
+```
+            rep.original_tokens = prof.count(decoded)
+            rep.encoded_tokens = prof.count(generated)
+            self.metrics.record(rep, direction="out", project=scope or self.cfg.scope)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+```
+
+Problem:
+The `try` block in `engine.py` attempts to record token usage metrics for model expansion, but any exception (e.g., missing tokenizer profile, invalid model, malformed input) is silently caught and discarded with `pass`. This creates a critical observability gap: failures in this telemetry path are invisible to operators or developers, potentially leading to undetected billing errors or broken monitoring of token efficiency. Since the project has no metrics system, the only viable fix is to log the exception with context so it’s visible to humans — and since this is a metrics recording block, logging is sufficient to surface the issue.
+
+Solution:
+Replace `except Exception: pass` with:
+
+```python
+except Exception as e:
+    import traceback
+    self.logger.error(f"Failed to record metrics for model {model}: {str(e)}")
+    # Optionally re-raise if caller needs to handle it — but not required here
+    # traceback.print_exc()  # optional for full stack trace if needed
+```
+
+Benefits:
+Once fixed, any failure in the metrics recording path will be logged with context (model, error message), enabling operators to detect and debug issues like missing token profiles or malformed inputs — preventing silent failures in cost tracking and performance monitoring.
