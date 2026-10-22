@@ -306,3 +306,26 @@ except Exception as e:
 
 Benefits:
 Once fixed, any failure in the metrics recording path will be logged with context (model, error message), enabling operators to detect and debug issues like missing token profiles or malformed inputs — preventing silent failures in cost tracking and performance monitoring.
+
+### AC-14 · Silent Exception Swallowing in Tokenizer Profile Instantiation
+Strength: Strong
+Files: core/tokenfold/tokenizers/registry.py
+Snippet:
+```
+        if name not in out:
+            try:
+                out[name] = TokenizerProfile(name=name, kind=kind, counter=factory(), exact=exact)
+            except Exception:
+                pass  # missing asset -> skip profile rather than fail
+    return out
+
+```
+
+Problem:
+The `except Exception: pass` block in `all_profiles()` silently discards any exception thrown during `TokenizerProfile` instantiation — including missing assets or factory errors — without logging or re-raising. This makes it impossible to know which tokenizers are failing to load, why, or which models are affected. In production, this could silently omit tokenizers from the registry, leading to incorrect or incomplete behavior — e.g., a model expecting a tokenizer that is now missing — with no observability trail.
+
+Solution:
+Log the exception with context (profile name, kind, factory) using stdlib logging, and optionally re-raise if the caller needs to handle it. Keep the `pass` if the caller does not need to handle it — but ensure the error is logged so it’s observable.
+
+Benefits:
+Operators and developers can now detect missing or failing tokenizers via logs, enabling debugging and preventing silent regressions. The fix uses only stdlib logging — no metrics or telemetry — matching the project’s capabilities and avoiding any new dependencies.
