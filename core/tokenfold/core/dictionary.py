@@ -20,8 +20,10 @@ Persistence: one JSON file per scope under paths.dictionaries_dir().
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
+import traceback
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
@@ -29,6 +31,8 @@ from typing import Optional
 from ..paths import dictionaries_dir
 
 _CODE_RE = re.compile(r"\b([KPE]\d+)\b")
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -68,8 +72,12 @@ class Dictionary:
                 self.aliases = {c: Alias(**a) for c, a in raw.get("aliases", {}).items()}
                 self.generations = [Generation(**g) for g in raw.get("generations", [])]
                 self.nursery = raw.get("nursery", {})
-            except Exception:
+            except Exception as e:
                 # corrupt dictionary must never block traffic
+                logger.warning(
+                    "Dictionary load failed for %s: %s: %s\n%s",
+                    self.path, type(e).__name__, str(e),
+                    traceback.format_exc())
                 self.aliases, self.generations, self.nursery = {}, [], {}
 
     def save(self) -> None:
