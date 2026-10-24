@@ -4,8 +4,11 @@ per-request via headers (adapters map X-TokenFold-* headers onto fields)."""
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field, asdict
 from ..paths import config_dir
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -45,8 +48,8 @@ def load() -> Config:
         try:
             return Config(**{**asdict(Config()),
                              **json.loads(p.read_text(encoding="utf-8"))}).clamp()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("config load failed for %s: %s", p, exc)
     return Config()
 
 
