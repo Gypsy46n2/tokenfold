@@ -30,6 +30,8 @@ from .folding import AbstractiveFolder, dedup_blob, fold_turn
 from .session import Session, session_id_for
 from ..tokenizers.registry import profile_for
 
+logger = logging.getLogger(__name__)
+
 TERSE_STYLE = "Reply terse, no preamble/summary. Code/paths/numbers exact."
 
 _CLAUSE_SPLIT = re.compile(r"[;]|(?<=[.!?])\s+")
@@ -514,8 +516,8 @@ class Encoder:
             try:
                 skel, regs = protected.extract(ln)
                 ln = protected.restore(phrases.compress(skel), regs).strip()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("terse-compress failed for line (len=%d): %s", len(ln), e, exc_info=True)
             if len(ln) > 240:               # word-boundary truncation
                 cut = ln.rfind(" ", 0, 237)
                 ln = ln[:cut if cut > 120 else 237] + "..."
