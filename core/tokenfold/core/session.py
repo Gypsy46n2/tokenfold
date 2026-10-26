@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from collections import Counter
@@ -16,6 +17,8 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 from ..paths import sessions_dir
+
+logger = logging.getLogger(__name__)
 
 # Proper-noun-ish phrases: 2+ capitalized words, or CamelCase products
 _ENTITY = re.compile(r"\b([A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+){1,3})\b")
@@ -79,7 +82,7 @@ class Session:
                 self.pending_expansions = raw.get("pending_expansions", [])
                 self.turn = raw.get("turn", 0)
             except Exception:
-                pass
+                logger.warning("Failed to restore session state from %s; falling back to defaults.", self.path, exc_info=True)
 
     def save(self) -> None:
         tmp = self.path.with_suffix(".tmp")
