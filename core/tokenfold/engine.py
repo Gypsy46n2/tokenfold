@@ -17,7 +17,10 @@ from .core.dictionary import Dictionary
 from .core.encoder import Encoder, EncodeReport
 from .core.folding import AbstractiveFolder
 from .core.metrics import Metrics
+import logging
 from .core.session import Session
+
+logger = logging.getLogger(__name__)
 
 
 class Engine:
@@ -155,8 +158,10 @@ class Engine:
             rep.original_tokens = prof.count(decoded)
             rep.encoded_tokens = prof.count(generated)
             self.metrics.record(rep, direction="out", project=scope or self.cfg.scope)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(
+                f"Failed to record metrics for model {model}: {type(e).__name__}: {e}"
+            )
 
     # ------------------------------------------------------------------
     def expansion_requests(self, response_text: str, session_id: str) -> list[tuple[str, str]]:
