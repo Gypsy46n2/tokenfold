@@ -26,6 +26,9 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Bug (found live, agent-manager integration 2026-08-21): a plain `pip install <path>`
 # only bundles the tokenfold* Python package (pyproject.toml's packages.find only
@@ -142,6 +145,10 @@ def all_profiles() -> dict[str, TokenizerProfile]:
         if name not in out:
             try:
                 out[name] = TokenizerProfile(name=name, kind=kind, counter=factory(), exact=exact)
-            except Exception:
+            except Exception as exc:
+                logger.error(
+                    "Failed to instantiate tokenizer profile '%s' (kind=%s): %s",
+                    name, kind, exc,
+                )
                 pass  # missing asset -> skip profile rather than fail
     return out
