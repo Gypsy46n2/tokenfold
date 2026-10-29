@@ -116,8 +116,11 @@ class Engine:
             self._since_mint[mint_key] = 0
             try:
                 enc.dict.mint()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(
+                    "enc.dict.mint() failed in encode() for scope=%s: %s",
+                    mint_key, repr(e), exc_info=True,
+                )
         if cache_key and not report.fallback:
             self.metrics.cache_put(cache_key, json.dumps(out, ensure_ascii=False),
                                    "encoded")
