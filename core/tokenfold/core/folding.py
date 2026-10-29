@@ -18,12 +18,14 @@ hashes so content can be re-expanded on demand.
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from typing import Callable, Optional
 
 from .session import Session, content_hash
 
+logger = logging.getLogger(__name__)
 _FENCE = re.compile(r"```[^\n]*\n(.*?)```", re.S)
 _KEY_LINE = re.compile(
     r"\b(error|fail(?:ed|ure)?|exception|traceback|decided?|decision|must|"
@@ -154,7 +156,7 @@ class AbstractiveFolder:
                     cur.digest_entries = fresh + cur.digest_entries[len(old):]
                     cur.save()
         except Exception:
-            pass
+            logger.warning("best-effort digest compaction failed key=%s session=%s", key, session.id, exc_info=True)
         finally:
             self._inflight.discard(key)
 
