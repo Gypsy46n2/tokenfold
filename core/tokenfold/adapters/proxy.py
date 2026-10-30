@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import logging
 from typing import AsyncIterator
 
 import httpx
@@ -144,6 +145,7 @@ padding:.3rem .7rem;text-align:left}}h1{{font-size:1.3rem}}
         upstream = f"{_upstream(request)}/chat/completions"
         headers = _fwd_headers(request)
         headers["content-type"] = "application/json"
+        logger = logging.getLogger(__name__)
 
         if body.get("stream"):
             async def gen() -> AsyncIterator[bytes]:
@@ -172,7 +174,12 @@ padding:.3rem .7rem;text-align:left}}h1{{font-size:1.3rem}}
                         try:
                             obj = json.loads(payload)
                             delta = obj["choices"][0]["delta"].get("content")
-                        except Exception:
+                        except Exception as exc:
+                            logger.warning(
+                                "sse_delta_parse_failed model=%s sid=%s exc=%s: %s  line=%s",
+                                model, sid, type(exc).__name__, str(exc),
+                                (line[:200] if line else "") if isinstance(line, str) else repr(line)[:200],
+                            )
                             yield (line + "\n\n").encode()
                             continue
                         if delta:
