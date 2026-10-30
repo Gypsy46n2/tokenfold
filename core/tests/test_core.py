@@ -1,9 +1,15 @@
 """Core safety + pipeline tests."""
 
+import asyncio
+import logging
 import os
 import sys
 import tempfile
 from pathlib import Path
+
+import httpx
+import unittest
+from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -773,3 +779,60 @@ def test_metrics_summary_splits_fallback_and_reports_effective_savings(tmp_path)
     assert s["saved"] == 100 - 60 - 30            # face value
     assert s["saved_effective"] == 100 - 60 - 3   # prefix-cache aware
     assert s["overhead_effective"] == 3
+
+
+# ---------------------------------------------------------------- ollama retry
+class TestOllamaNativeRetry(unittest.TestCase):
+    """Test that the ollama_native retry path logs a warning on JSON parse failure."""
+
+    def test_retry_json_parse_failure_logs_warning(self):
+        """Mock the second POST to return invalid JSON and verify warning is logged.
+
+        Verifies that when the first Ollama POST returns content that triggers
+        an expansion retry, and the retry POST returns a response whose .json()
+        raises, the warning 'Ollama retry JSON parse failed' is logged at
+        WARNING level to the 'core.tokenfold.adapters.ollama_native' logger.
+        """
+        from tokenfold.core.engine import Engine
+        from tokenfold.core.config import Config
+        from tokenfold.adapters.ollama_native import add_ollama_routes
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        # Setup engine and config
+        config = Config()
+        eng = Engine(config)
+
+        # Create mock httpx client
+        mock_client = MagicMock()
+
+        # First POST returns valid JSON with content that triggers expansion_requests
+        valid_json = {"message": {"content": "[ref:test] expand me"}}
+        first_response = httpx.Response(200, json=valid_json)
+
+        # Second POST (retry) returns invalid JSON that causes .json() to raise
+        second_response = httpx.Response(200, text="not valid json{{{")
+
+        mock_client.post = AsyncMock(side_effect=[first_response, second_response])
+
+        # Make expansion_requests return something truthy to trigger retry path
+        eng.expansion_requests = MagicMock(return_value=[("test", "expanded content")])
+
+        # Setup FastAPI app with ollama routes
+        app = FastAPI()
+        add_ollama_routes(app, eng, mock_client)
+
+        # Make request and verify warning is logged
+        with self.assertLogs('core.tokenfold.adapters.ollama_native', logging.WARNING) as log_ctx:
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/api/chat",
+                    json={"model": "test", "messages": [{"role": "user", "content": "hello"}]}
+                )
+
+        # Verify warning was logged
+        self.assertTrue(
+            any("Ollama retry JSON parse failed" in record.getMessage()
+                for record in log_ctx.records),
+            f"Expected warning not found. Logs: {[record.getMessage() for record in log_ctx.records]}"
+        )
