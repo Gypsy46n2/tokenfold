@@ -24,6 +24,7 @@ X-TokenFold-Upstream.
 from __future__ import annotations
 
 import json
+import logging
 from typing import AsyncIterator
 
 import httpx
@@ -32,6 +33,8 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from ..engine import Engine
 from .proxy import STREAM_TIMEOUT
+
+logger = logging.getLogger(__name__)
 
 HOP_BY_HOP = {"host", "content-length", "connection", "keep-alive",
               "transfer-encoding", "upgrade", "proxy-authorization", "te",
@@ -121,7 +124,7 @@ def add_ollama_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -> N
                     try:
                         obj = r2.json()
                     except Exception:
-                        pass
+                        logger.warning("Ollama retry JSON parse failure: %s", str(r2.text)[:500])
             msg = obj.get("message") or {}
             if isinstance(msg.get("content"), str):
                 raw_txt = msg["content"]
