@@ -352,3 +352,26 @@ Log the exception with context (including `cache_key`, `encoded`, and `session_i
 
 Benefits:  
 Failures that previously went unnoticed will now surface as logged errors, enabling debugging and preventing silent data corruption. The caller can now handle or recover from cache decode failures appropriately, rather than proceeding with potentially invalid or missing data.
+
+### AC-16 · Silent Failure in Dictionary Minting
+Strength: Strong
+Files: core/tokenfold/engine.py
+Snippet:
+```
+            self._since_mint[mint_key] = 0
+            try:
+                enc.dict.mint()
+            except Exception:
+                pass
+        if cache_key and not report.fallback:
+            self.metrics.cache_put(cache_key, json.dumps(out, ensure_ascii=False),
+```
+
+Problem:
+The `try` block around `enc.dict.mint()` silently discards any exception that occurs during dictionary minting — no logging, no re-raising, no telemetry. Since the project has no metrics system, there’s no way to observe how often this silent failure happens. This creates an unobservable operational risk: if dictionary minting fails (e.g., due to invalid state or resource exhaustion), the caller gets no feedback, and the failure goes unnoticed — potentially leading to degraded or incorrect encoding behavior without any alert or trace.
+
+Solution:
+Replace the empty `except Exception: pass` block with a logging statement that records the exception with scope context, then re-raise to preserve caller handling. Use `logging.error` with the scope key to aid debugging, and re-raise to maintain original error semantics. This uses only stdlib logging — no metrics or telemetry required.
+
+Benefits:
+Once fixed, failures in dictionary minting become observable through logs, enabling operators to detect and respond to issues. The fix preserves caller error handling while adding visibility — eliminating silent failures that could otherwise go unnoticed in production.
