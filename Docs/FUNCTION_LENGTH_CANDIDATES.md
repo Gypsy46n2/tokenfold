@@ -133,3 +133,132 @@ Each extracted function has a single, clear responsibility and can be tested ind
 
 VERDICT CONSTRAINT:
 Genuine
+
+### AC-2 · Chat Function Decomposition
+Strength: Strong
+Files: core/tokenfold/adapters/proxy.py
+Symbol: chat
+Snippet:
+```
+    # -----------------------------------------------------------------
+    @app.post("/v1/chat/completions")
+    async def chat(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            raw = await request.body()
+            r = await client.post(f"{_upstream(request)}/chat/completions",
+                                  content=raw, headers=_fwd_headers(request))
+            return Response(r.content, r.status_code)
+
+        mode_hdr = request.headers.get("x-tokenfold-mode")
+        route_hdr = request.headers.get("x-tokenfold-route")
+        if mode_hdr:
+            eng.cfg.mode = mode_hdr.upper()
+            eng.cfg.clamp()
+        if route_hdr:
+            eng.cfg.route_mode = route_hdr.lower()
+            eng.cfg.clamp()
+
+        model = body.get("model", "")
+        messages = body.get("messages", [])
+        sid_hdr = request.headers.get("x-tokenfold-session")
+        scope_hdr = request.headers.get("x-tokenfold-scope")
+        encoded, report = eng.encode(messages, model, session_id=sid_hdr, scope=scope_hdr)
+        body["messages"] = encoded
+        sid = report.session_id
+
+        upstream = f"{_upstream(request)}/chat/completions"
+        headers = _fwd_headers(request)
+        headers["content-type"] = "application/json"
+
+        if body.get("stream"):
+            async def gen() -> AsyncIterator[bytes]:
+                sd = eng.stream_decoder(sid, scope=scope_hdr)
+                raw_acc, dec_acc = [], []
+                async with client.stream("POST", upstream, json=body, timeout=STREAM_TIMEOUT,
+                                         headers=headers) as r:
+                    async for line in r.aiter_lines():
+                        if not line.startswith("data:"):
+                            if line.strip():
+                                yield (line + "\n").encode()
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            tail = sd.flush()
+                            if tail:
+                                dec_acc.append(tail)
+                                yield _sse_delta(tail)
+                            raw, dec = "".join(raw_acc), "".join(dec_acc)
+                            eng.record_output(model, raw, dec, sid, scope=scope_hdr)
+                            # streamed: can't retry, but note the ask so the
+                            # NEXT request ships the original automatically
+                            eng.expansion_requests(raw, sid)
+                            yield b"data: [DONE]\n\n"
+                            continue
+                        try:
+                            obj = json.loads(payload)
+                            delta = obj["choices"][0]["delta"].get("content")
+                        except Exception:
+                            yield (line + "\n\n").encode()
+                            continue
+                        if delta:
+                            raw_acc.append(delta)
+                            piece = sd.feed(delta)
+                            if piece:
+                                dec_acc.append(piece)
+                                obj["choices"][0]["delta"]["content"] = piece
+                                yield ("data: " + json.dumps(obj) + "\n\n").encode()
+                            # swallowed partial: emitted once boundary is safe
+                        else:
+                            yield (line + "\n\n").encode()
+            return StreamingResponse(gen(), media_type="text/event-stream")
+
+        r = await client.post(upstream, json=body, headers=headers)
+        try:
+            obj = r.json()
+            raw0 = ((obj.get("choices") or [{}])[0].get("message") or {}).get("content")
+            # auto re-expansion: model asked to see a folded ref -> inject the
+            # original and retry ONCE before answering the user
+            if isinstance(raw0, str):
+                asks = eng.expansion_requests(raw0, sid)
+                if asks:
+                    supplement = "\n\n".join(
+                        f"[expanded {h}]\n{orig}" for h, orig in asks[:3])
+                    retry = dict(body)
+                    retry["messages"] = list(body["messages"]) + [
+                        {"role": "assistant", "content": raw0},
+                        {"role": "user", "content":
+                         "Expanded content you requested:\n" + supplement +
+                         "\n\nNow answer the previous question."}]
+                    r2 = await client.post(upstream, json=retry, headers=headers)
+                    try:
+                        obj = r2.json()
+                    except Exception:
+                        pass
+            for ch in obj.get("choices", []):
+                msg = ch.get("message", {})
+                if isinstance(msg.get("content"), str):
+                    raw = msg["content"]
+                    msg["content"] = eng.decode(raw, sid, scope=scope_hdr)
+                    eng.record_output(model, raw, msg["content"], sid, scope=scope_hdr)
+            return JSONResponse(obj, status_code=r.status_code)
+        except Exception:
+            return Response(r.content, r.status_code)
+```
+
+Problem:
+The `chat` function is 103 lines long and performs at least six distinct responsibilities: HTTP body parsing with fallbacks, header-based engine configuration, message encoding with session/scope injection, streaming response generation with stateful delta management, non-streaming POST with retry logic for expanded content, and final response construction with decoding and output recording. These responsibilities have different failure modes, test requirements, and side effects — for example, streaming logic is stateful and error-prone while retry logic modifies request state independently. Keeping them all in one function creates cognitive overload, reduces test isolation, and makes incremental changes risky.
+
+Solution:
+Extract six logical pieces into separate async functions: `_parse_request_body`, `_configure_engine_from_headers`, `_extract_model_and_messages`, `_handle_streaming_request`, `_handle_non_streaming_request`, and `_record_output`. Each function should handle one responsibility, with clear inputs and outputs. The main `chat` function becomes a coordinator that orchestrates these pieces based on the `stream` flag, with no internal logic beyond routing and error handling.
+
+Benefits:
+Decomposition improves readability by isolating concerns, enables focused unit tests for each subfunction (e.g., test streaming deltas without touching retry logic), and allows independent evolution — for example, changing streaming behavior won’t require touching retry or config logic. It also reduces the risk of introducing bugs during refactoring or debugging by limiting scope.
+
+VERDICT CONSTRAINT:
+- The function snippet IS provided above in this prompt; you do not need to request it or assume it is missing.
+- You MUST render exactly one verdict: GENUINE or FALSE POSITIVE.
+- Refusals, hedging, or a third outcome (including "Uncertain", "I cannot determine", or any other qualifier) are NOT acceptable. Pick the one verdict that best fits the evidence in the snippet and commit to it.
+
+VERDICT: GENUINE
