@@ -262,3 +262,226 @@ VERDICT CONSTRAINT:
 - Refusals, hedging, or a third outcome (including "Uncertain", "I cannot determine", or any other qualifier) are NOT acceptable. Pick the one verdict that best fits the evidence in the snippet and commit to it.
 
 VERDICT: GENUINE
+
+### AC-3 · Decompose Monolithic Encoder
+Strength: Strong
+Files: core/tokenfold/core/encoder.py
+Symbol: _encode
+Snippet:
+```
+
+    # ------------------------------------------------------------------
+    def _encode(self, messages: list[dict], model: str, prof,
+                report: EncodeReport, t0: float,
+                session_id: str | None = None,
+                provider: str = "") -> tuple[list[dict], EncodeReport]:
+        cfg = self.cfg
+        sid = session_id or session_id_for(messages)
+        report.session_id = sid
+        session = Session(sid)
+        session.turn += 1
+
+        if cfg.mode == "OFF":
+            report.original_tokens = report.encoded_tokens = self._count_all(messages, prof)
+            report.latency_ms = (time.perf_counter() - t0) * 1000
+            return messages, report
+
+        # Tiny requests can never clear the min-savings thresholds: the full
+        # pipeline runs only to have the never-larger invariant revert it,
+        # which burned latency AND stamped fallback=True — live metrics showed
+        # a cluster of 5–35 token requests inflating fallback_pct with what is
+        # really just correct "nothing to do here" behavior. Skip early.
+        total_tok = self._count_all(messages, prof)
+        if total_tok < cfg.min_encode_tokens:
+            # Learning must NOT be gated with the pipeline: short boilerplate
+            # repeated across many tiny requests is exactly what the nursery
+            # exists to notice. Same observe step the candidate search runs.
+            for m in messages:
+                if m.get("role") in ("user", "system"):
+                    try:
+                        skel, _regs = protected.extract(self._text(m))
+                        terse = phrases.compress(skel)
+                    except Exception:
+                        continue
+                    for clause in [c.strip() for c in _CLAUSE_SPLIT.split(terse)
+                                   if len(c.strip()) > 15]:
+                        if "⟦" not in clause:
+                            self.dict.observe(clause, prof.count(clause))
+            self.dict.save()
+            report.original_tokens = report.encoded_tokens = total_tok
+            report.messages.append(MessageReport(
+                index=0, representation="small-passthrough",
+                original_tokens=total_tok, encoded_tokens=total_tok))
+            report.latency_ms = (time.perf_counter() - t0) * 1000
+            session.save()          # the turn increment above must still stick
+            return messages, report
+
+        # observe entities across all user/system text
+        for m in messages:
+            if m.get("role") in ("user", "system"):
+                session.observe_entities(self._text(m))
+
+        out: list[dict] = []
+        n = len(messages)
+        keep = cfg.fold_after_turns
+        if cfg.mode == "MAX":
+            keep = 1                     # MAX: only the newest turn verbatim
+        fold_cutoff = max(0, n - keep) if cfg.fold_history else 0
+
+        # token budget of full history for abstractive trigger
+        hist_tokens = self._count_all(messages, prof)
+
+        digest_mode = cfg.fold_history and cfg.history_style == "digest"
+
+        # Two complete candidate encodings are built in parallel:
+        #   A) alias set  (K/P/E codes; needs dictionary/entity injections)
+        #   B) noalias set (terse/folds only; needs no injections)
+        # After injection overhead is known, the cheaper TOTAL wins.
+        out_noalias: list[dict] = []
+        old_hashes: set[str] = set()
+        for i, m in enumerate(messages):
+            text = self._text(m)
+            role = m.get("role", "user")
+            orig_tok = prof.count(text)
+            report.original_tokens += orig_tok
+
+            if not text or not isinstance(m.get("content"), str):
+                out.append(m)
+                out_noalias.append(m)
+                report.encoded_tokens += orig_tok
+                continue
+
+            is_old = i < fold_cutoff and role in ("user", "assistant", "tool") and i > 0
+            # An assistant message carrying tool_calls must NEVER be folded away:
+            # its paired role:"tool" message (kept as a [ref:...] below) has a
+            # tool_call_id that the API requires be introduced by a preceding
+            # assistant tool_calls. Omit the assistant turn and the upstream
+            # 400s the whole request. Keep it verbatim (these turns are short).
+            if is_old and m.get("tool_calls"):
+                out.append(m)
+                out_noalias.append(m)
+                report.encoded_tokens += orig_tok
+                report.messages.append(MessageReport(
+                    index=i, representation="tool-call", original_tokens=orig_tok,
+                    encoded_tokens=orig_tok))
+                continue
+            if is_old and role == "tool":
+                # tool results: keep the message (API pairing with tool_calls)
+                # but replace bulky old content with a reference
+                if len(text) > 200:
+                    from .session import content_hash as _ch
+                    h, _seen = session.note_blob(text, "tool")
+                    enc = f"[ref:{h} tool-result; expand on request]"
+                    out.append({**m, "content": enc})
+                    out_noalias.append({**m, "content": enc})
+                    report.encoded_tokens += prof.count(enc)
+                    report.messages.append(MessageReport(
+                        index=i, representation="fold", original_tokens=orig_tok,
+                        encoded_tokens=prof.count(enc)))
+                else:
+                    out.append(m)
+                    out_noalias.append(m)
+                    report.encoded_tokens += orig_tok
+                continue
+            if is_old and digest_mode:
+                from .session import content_hash as _ch
+                if _ch(text) in session.pending_expansions:
+                    # the model asked for this turn's content: ship it once
+                    session.pending_expansions.remove(_ch(text))
+                    out.append(m)
+                    out_noalias.append(m)
+                    report.encoded_tokens += orig_tok
+                    report.messages.append(MessageReport(
+                        index=i, representation="expanded",
+                        original_tokens=orig_tok, encoded_tokens=orig_tok))
+                    continue
+                # rolling digest: absorb once, then omit the turn entirely
+                old_hashes.add(self._absorb_into_digest(text, role, session))
+                report.messages.append(MessageReport(
+                    index=i, representation="digest", original_tokens=orig_tok,
+                    encoded_tokens=0))
+                continue
+            if is_old:
+                enc_na, enc, rep = self._fold_old_turn(text, session, i, hist_tokens)
+                conf, fails = 1.0, []
+            else:
+                enc_na, enc, rep, conf, fails = self._compress_new(
+                    text, role, prof, session)
+                report.messages.append(MessageReport(
+                    index=i, representation=rep, original_tokens=orig_tok,
+                    encoded_tokens=prof.count(enc), confidence=conf, failures=fails))
+
+            # never ship a longer message than the original
+            if prof.count(enc) >= orig_tok:
+                enc = text
+            if prof.count(enc_na) >= orig_tok:
+                enc_na = text
+            out.append({**m, "content": enc})
+            out_noalias.append({**m, "content": enc_na})
+
+        # ---- rolling digest block (one message for ALL old turns) ------
+        # Only lines whose source turn is present in THIS request: a session
+        # resumed with different history must not leak stale digest lines.
+        window = 15 if cfg.mode == "MAX" else 30
+        digest_lines = [e["line"] for e in session.digest_entries
+                        if any(h in old_hashes
+                               for h in (e.get("hs") or [e.get("h")]))][-window:]
+        if self.folder and digest_mode:
+            # background: squeeze old digest lines with the tiny model
+            self.folder.maybe_compact_digest(session, window)
+        # The digest is NOT inserted as its own system message: strict chat
+        # templates (Qwen3-family and others) raise "System message must be at
+        # the beginning" for any system message past index 0, and the upstream
+        # turns that into a hard 500. It is composed into the LEADING system
+        # message at the end of assembly instead — after the byte-stable
+        # DICT/style injections, so the stable prefix stays cacheable and the
+        # per-turn digest is the only part that changes.
+        digest_base = digest_alias = ""
+        if digest_mode and digest_lines:
+            digest_base = "HIST (compact digest of earlier turns; ask to expand any "\
+                          "[code:...] ref): " + " | ".join(digest_lines)
+            digest_alias = self._alias_pass(digest_base, session)
+
+        # ---- stable injections (system head) --------------------------
+        # The upstream API is stateless: definitions must ride along on EVERY
+        # request whose encoded content uses codes.
+        #
+        # Bug (found scanning for more agent-manager blockers, 2026-08-21): this used to
+        # inject bootstrap_for(session.used_codes) -- the GROW-ONLY, EVER-ACCUMULATING
+        # list of every code a session has used across its whole lifetime -- instead of
+        # `used` (already computed two lines below: just the codes this message's own
+        # content actually references). The "byte-stable prefix, provider caching
+        # amortizes it" reasoning is real for a provider with actual prompt-prefix
+        # caching (Anthropic's cache_control, the one real user of this), but this
+        # engine's `provider` argument (see Engine.encode) was never threaded down here
+        # to gate on it -- the same discount applied unconditionally, including to a
+        # plain Ollama upstream with no such mechanism, where every byte of an "amortized"
+        # glossary is fully re-sent and fully counted on every single call regardless.
+        # Confirmed live: a long-lived worker session had accumulated 116 used_codes: a
+        # single-message request whose own alias substitution genuinely won (64->22
+        # tokens) still reverted to the full original 64 tokens, because the glossary
+        # for all 116 historical codes swamped the eff_overhead comparison even after the
+        # 90% cache_discount. Injecting only `used` (a handful of codes, sized to what
+        # THIS message actually needs) fixes the decision at its root for every provider,
+        # not just non-caching ones -- a smaller glossary is a smaller cost no matter who
+        # is paying it, so this is strictly better even where real prefix caching exists.
+        inject_parts: list[str] = []
+        if cfg.inject_bootstrap:
+            from .dictionary import find_codes
+            est = self.dict.established_codes()
+            scan_texts = [self._text(m) for m in out]
+            if digest_alias:
+// ... [truncated for review: this function continues for 155 more line(s) not shown]
+```
+
+Problem:
+This function is a monolithic orchestrator that combines six distinct responsibilities: OFF mode early exit, tiny request optimization, history folding (with tool_calls, digest_mode, alias folding), new message compression, digest aggregation and insertion, and stable code injection with provider-aware fixes. The nested conditionals and side-effecting state updates force readers to trace 6–7 control flows through a single function, violating the Single Responsibility Principle and making unit testing, debugging, and incremental modification extremely difficult.
+
+Solution:
+Extract six logical pieces into separate functions: _encode_initial_checks for early exits and entity observation; _fold_history for folding logic; _compress_messages for new message compression; _build_digest for digest aggregation and insertion; _inject_stable_codes for session-specific stable code injection. Each function should accept only the necessary inputs and return only the necessary outputs, with no side effects except for mutating the report or session state in a controlled way.
+
+Benefits:
+Decomposing this function improves readability by isolating concerns, enables independent unit testing for each responsibility, and simplifies debugging and incremental modification. Reviewers can focus on one logical unit at a time, reducing cognitive load and minimizing the risk of introducing regressions during changes.
+
+VERDICT CONSTRAINT (mandatory for this task):
+Genuine
