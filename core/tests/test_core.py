@@ -773,3 +773,126 @@ def test_metrics_summary_splits_fallback_and_reports_effective_savings(tmp_path)
     assert s["saved"] == 100 - 60 - 30            # face value
     assert s["saved_effective"] == 100 - 60 - 3   # prefix-cache aware
     assert s["overhead_effective"] == 3
+
+
+# ------------------------------------------------- ollama retry path
+def _run(coro):
+    """Helper: run an async coroutine in a fresh event loop (sync test compat)."""
+    import asyncio
+    return asyncio.run(coro)
+
+
+def test_ollama_retry_json_parse_failure_logs_warning():
+    """Drive the real Ollama adapter retry path end-to-end:
+
+    - A fake httpx.AsyncClient returns a valid JSON response on the first
+      ``post`` (so ``expansion_requests`` gets triggered) and a non-JSON
+      response on the second (the retry), causing ``r2.json()`` to raise.
+    - The adapter's real ``logger.warning("Ollama retry JSON parse failure: ...")``
+      call on ``tokenfold.adapters.ollama_native`` must fire.
+
+    This is NOT a manual mimic: it exercises the actual ``ollama_chat`` route
+    handler, the real ``expansion_requests`` gate, and the real ``r2.json()``
+    try/except that emits the warning.
+    """
+    import asyncio
+    import logging
+    from unittest import mock
+
+    import httpx
+    from fastapi import FastAPI
+
+    from tokenfold.adapters.ollama_native import add_ollama_routes
+    from tokenfold.core.config import Config
+    from tokenfold.core.engine import Engine
+
+    logger_name = "tokenfold.adapters.ollama_native"
+    logger = logging.getLogger(logger_name)
+
+    # Capture warning records on the real logger
+    captured = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            captured.append(record)
+
+    handler = _Capture()
+    handler.setLevel(logging.WARNING)
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+    logger.propagate = False
+    try:
+        # -- mock httpx.AsyncClient: returns responses in sequence ----------
+        first_resp = httpx.Response(
+            200,
+            json={"message": {"content": "please expand the docs"}},
+        )
+        second_resp = httpx.Response(
+            200,
+            content=b"<html>upstream error</html>",
+            headers={"content-type": "text/html"},
+        )
+
+        seq = [0]
+
+        async def _fake_post(*args, **kwargs):
+            seq[0] += 1
+            if seq[0] == 1:
+                return first_resp
+            return second_resp
+
+        fake_client = mock.AsyncMock()
+        fake_client.post = _fake_post
+        fake_client.__aenter__ = mock.AsyncMock(return_value=fake_client)
+        fake_client.__aexit__ = mock.AsyncMock(return_value=False)
+
+        # -- engine: expansion_requests must return asks to trigger retry ---
+        eng = Engine(Config())
+        eng.expansion_requests = mock.Mock(
+            return_value=[("docs", "the original docs text")]
+        )
+
+        # -- wire the real routes with the fake client ----------------------
+        app = FastAPI()
+        add_ollama_routes(app, eng, fake_client)
+
+        # Find the /api/chat route handler
+        chat_route = next(r for r in app.routes if r.path == "/api/chat")
+        handler_fn = chat_route.endpoint
+
+        # -- build a request that hits the expansion-retry branch ----------
+        # upstream ends in /v1 so the trailing-slash strip produces a real base
+        fake_request = mock.AsyncMock()
+        fake_request.json = mock.AsyncMock(
+            return_value={
+                "model": "llama3",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": False,
+            }
+        )
+        fake_request.headers = {
+            "x-tokenfold-upstream": "http://localhost:11434/v1",
+        }
+        fake_request.body = mock.AsyncMock(return_value=b"{}")
+
+        # -- drive the real route handler ----------------------------------
+        _run(handler_fn(fake_request))
+
+        # -- assertion: the real logger emitted the expected warning -------
+        warn_records = [r for r in captured if r.levelno == logging.WARNING]
+        assert warn_records, (
+            "expected a WARNING on %r from the retry JSON parse failure path, "
+            "captured: %s" % (logger_name, [r.message for r in captured])
+        )
+        assert any("Ollama retry JSON parse failure" in r.getMessage()
+                   for r in warn_records), (
+            "warning message should mention 'Ollama retry JSON parse failure'; "
+            "got: %r" % warn_records[-1].getMessage()
+        )
+        assert warn_records[-1].name == logger_name, (
+            "warning must land on the real adapter logger %r, got %r"
+            % (logger_name, warn_records[-1].name)
+        )
+    finally:
+        logger.removeHandler(handler)
+        logger.propagate = True
