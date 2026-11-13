@@ -329,3 +329,26 @@ Log the exception with context (profile name, kind, factory) using stdlib loggin
 
 Benefits:
 Operators and developers can now detect missing or failing tokenizers via logs, enabling debugging and preventing silent regressions. The fix uses only stdlib logging — no metrics or telemetry — matching the project’s capabilities and avoiding any new dependencies.
+
+### AC-15 · Silent Cache Decode Failures
+Strength: Strong
+Files: core/tokenfold/engine.py
+Snippet:
+```
+                    report = EncodeReport(session_id="cache", model=model,
+                                          profile="cache", exact_tokenizer=True)
+                    return out, report
+                except Exception:
+                    pass
+        out, report = enc.encode(messages, model, session_id=session_id, provider=provider)
+        self.metrics.record(report, direction="in", provider=provider,
+```
+
+Problem:  
+The `try`/`except` block in the cache hit path silently catches and discards any exception raised during `json.loads(encoded)`, including JSON decode errors or corrupted cache data. Since there is no logging or re-raising, failures are completely invisible to the caller — the function returns `(None, None)` or a default report without indicating failure. This could silently corrupt downstream state, especially if the cache holds critical session data or model outputs, and the absence of any telemetry or logging makes root-cause analysis impossible.
+
+Solution:  
+Log the exception with context (including `cache_key`, `encoded`, and `session_id`) using `logging.error`, then re-raise the exception to propagate the failure to the caller. This preserves the original intent of the cache hit while surfacing failures for debugging. Since the project has no metrics system, logging to `stderr` via `logging.error` is the only available observability primitive.
+
+Benefits:  
+Failures that previously went unnoticed will now surface as logged errors, enabling debugging and preventing silent data corruption. The caller can now handle or recover from cache decode failures appropriately, rather than proceeding with potentially invalid or missing data.
