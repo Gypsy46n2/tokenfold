@@ -621,3 +621,230 @@ Decomposing the function reduces its length to ~30 lines, improves test clarity 
 
 VERDICT CONSTRAINT:
 Genuine
+
+### AC-5 · Decompose Ollama Route Handler by Endpoint Logic
+Strength: Strong
+Files: core/tokenfold/adapters/ollama_native.py
+Symbol: add_ollama_routes
+Snippet:
+```
+
+
+def add_ollama_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -> None:
+
+    def _upstream(req: Request) -> str:
+        base = (req.headers.get("x-tokenfold-upstream")
+                or eng.cfg.upstream).rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3].rstrip("/")
+        return base
+
+    def _fwd_headers(req: Request) -> dict:
+        return {k: v for k, v in req.headers.items()
+                if k.lower() not in HOP_BY_HOP
+                and not k.lower().startswith("x-tokenfold")}
+
+    def _apply_header_overrides(request: Request) -> None:
+        mode_hdr = request.headers.get("x-tokenfold-mode")
+        route_hdr = request.headers.get("x-tokenfold-route")
+        if mode_hdr:
+            eng.cfg.mode = mode_hdr.upper()
+            eng.cfg.clamp()
+        if route_hdr:
+            eng.cfg.route_mode = route_hdr.lower()
+            eng.cfg.clamp()
+
+    # -----------------------------------------------------------------
+    @app.post("/api/chat")
+    async def ollama_chat(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            raw = await request.body()
+            r = await client.post(f"{_upstream(request)}/api/chat",
+                                  content=raw, headers=_fwd_headers(request))
+            return Response(r.content, r.status_code)
+
+        _apply_header_overrides(request)
+        model = body.get("model", "")
+        messages = body.get("messages", [])
+        sid_hdr = request.headers.get("x-tokenfold-session")
+        scope_hdr = request.headers.get("x-tokenfold-scope")
+        encoded, report = eng.encode(messages, model, provider="ollama",
+                                     session_id=sid_hdr, scope=scope_hdr)
+        body["messages"] = encoded
+        sid = report.session_id
+
+        upstream = f"{_upstream(request)}/api/chat"
+        headers = _fwd_headers(request)
+        headers["content-type"] = "application/json"
+
+        if body.get("stream"):
+            return StreamingResponse(
+                _stream_ndjson(upstream, body, headers, model, sid, scope_hdr,
+                               field=("message", "content")),
+                media_type="application/x-ndjson")
+
+        r = await client.post(upstream, json=body, headers=headers)
+        try:
+            obj = r.json()
+            msg = obj.get("message") or {}
+            raw0 = msg.get("content")
+            # Bug (found scanning the repo for more agent-manager blockers, 2026-08-21):
+            # the non-streaming /v1/chat/completions route (proxy.py) auto-detects the
+            # model asking to see a folded [ref:...]/[code:...] placeholder and retries
+            # once with the real content injected; this route (and /api/generate below)
+            # never did, despite sharing the exact same folding mechanism -- only their
+            # STREAMING sibling (_stream_ndjson) called expansion_requests at all. A model
+            # response asking to expand a fold would ship as-is here instead of getting
+            # the automatic re-answer proxy.py gives OpenAI-API callers.
+            if isinstance(raw0, str):
+                asks = eng.expansion_requests(raw0, sid)
+                if asks:
+                    supplement = "\n\n".join(
+                        f"[expanded {h}]\n{orig}" for h, orig in asks[:3])
+                    retry = dict(body)
+                    retry["messages"] = list(body["messages"]) + [
+                        {"role": "assistant", "content": raw0},
+                        {"role": "user", "content":
+                         "Expanded content you requested:\n" + supplement +
+                         "\n\nNow answer the previous question."}]
+                    r2 = await client.post(upstream, json=retry, headers=headers)
+                    try:
+                        obj = r2.json()
+                    except Exception:
+                        logger.warning("Ollama retry JSON parse failure: %s", str(r2.text)[:500])
+            msg = obj.get("message") or {}
+            if isinstance(msg.get("content"), str):
+                raw_txt = msg["content"]
+                msg["content"] = eng.decode(raw_txt, sid, scope=scope_hdr)
+                eng.record_output(model, raw_txt, msg["content"], sid, scope=scope_hdr)
+            return JSONResponse(obj, status_code=r.status_code)
+        except Exception:
+            return Response(r.content, r.status_code)
+
+    # -----------------------------------------------------------------
+    @app.post("/api/generate")
+    async def ollama_generate(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            raw = await request.body()
+            r = await client.post(f"{_upstream(request)}/api/generate",
+                                  content=raw, headers=_fwd_headers(request))
+            return Response(r.content, r.status_code)
+
+        _apply_header_overrides(request)
+        model = body.get("model", "")
+        sid_hdr = request.headers.get("x-tokenfold-session")
+        scope_hdr = request.headers.get("x-tokenfold-scope")
+
+        # single-string prompt -> single-message encode, then rebuild.
+        # Any system-role message the encoder emits (dictionary preamble)
+        # rides in Ollama's dedicated `system` field.
+        msgs = []
+        if body.get("system"):
+            msgs.append({"role": "system", "content": body["system"]})
+        msgs.append({"role": "user", "content": body.get("prompt", "")})
+        encoded, report = eng.encode(msgs, model, provider="ollama",
+                                     session_id=sid_hdr, scope=scope_hdr)
+        sid = report.session_id
+        sys_parts = [m.get("content", "") for m in encoded
+                     if m.get("role") == "system" and m.get("content")]
+        rest = [m.get("content", "") for m in encoded
+                if m.get("role") != "system" and m.get("content")]
+        if sys_parts:
+            body["system"] = "\n\n".join(sys_parts)
+        body["prompt"] = "\n\n".join(rest)
+
+        upstream = f"{_upstream(request)}/api/generate"
+        headers = _fwd_headers(request)
+        headers["content-type"] = "application/json"
+
+        if body.get("stream"):
+            return StreamingResponse(
+                _stream_ndjson(upstream, body, headers, model, sid, scope_hdr,
+                               field=("response",)),
+                media_type="application/x-ndjson")
+
+        r = await client.post(upstream, json=body, headers=headers)
+        try:
+            obj = r.json()
+            raw0 = obj.get("response")
+            # See ollama_chat's identical fix just above for why this is needed: only
+            # the streaming path called expansion_requests before. /api/generate has no
+            # message list to append a follow-up turn to (single `prompt` string), so
+            # the retry appends the expansion request directly onto the original prompt
+            # instead of proxy.py's/ollama_chat's synthetic assistant+user turn pair.
+            if isinstance(raw0, str):
+                asks = eng.expansion_requests(raw0, sid)
+                if asks:
+                    supplement = "\n\n".join(
+                        f"[expanded {h}]\n{orig}" for h, orig in asks[:3])
+                    retry = dict(body)
+                    retry["prompt"] = (
+                        body.get("prompt", "") + "\n\n" + raw0 +
+                        "\n\nExpanded content you requested:\n" + supplement +
+                        "\n\nNow answer the previous question.")
+                    r2 = await client.post(upstream, json=retry, headers=headers)
+                    try:
+                        obj = r2.json()
+                    except Exception:
+                        pass
+            if isinstance(obj.get("response"), str):
+                raw_txt = obj["response"]
+                obj["response"] = eng.decode(raw_txt, sid, scope=scope_hdr)
+                eng.record_output(model, raw_txt, obj["response"], sid, scope=scope_hdr)
+            return JSONResponse(obj, status_code=r.status_code)
+        except Exception:
+            return Response(r.content, r.status_code)
+
+    # -----------------------------------------------------------------
+    async def _stream_ndjson(upstream: str, body: dict, headers: dict,
+                             model: str, sid: str, scope: str | None,
+                             field: tuple) -> AsyncIterator[bytes]:
+        sd = eng.stream_decoder(sid, scope=scope)
+        raw_acc, dec_acc = [], []
+        saw_done = False
+        # The `field` path's parent key, so a terminal frame can carry the
+        # flushed decoder tail even when the upstream never sent `done`.
+        content_key = field[-1]
+        try:
+            async with client.stream("POST", upstream, json=body, timeout=STREAM_TIMEOUT,
+                                     headers=headers) as r:
+                async for line in r.aiter_lines():
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        yield (line + "\n").encode()
+                        continue
+                    # walk to the content field ("response") or ("message","content")
+                    holder, key = obj, content_key
+                    for part in field[:-1]:
+                        holder = holder.get(part) if isinstance(holder, dict) else None
+                    chunk = holder.get(key) if isinstance(holder, dict) else None
+                    if isinstance(chunk, str) and chunk:
+                        raw_acc.append(chunk)
+                        piece = sd.feed(chunk)
+                        holder[key] = piece or ""
+                        if piece:
+// ... [truncated for review: this function continues for 48 more line(s) not shown]
+```
+
+Problem:
+The function `add_ollama_routes` is 248 lines long and orchestrates two distinct HTTP endpoints (`/api/chat` and `/api/generate`) with nearly identical but divergent logic: request parsing, header forwarding, encoding, streaming, and especially retry logic for expansion requests — which is duplicated and inconsistently implemented. This violates single responsibility and makes the function brittle to changes, hard to test, and prone to bugs that only manifest in one endpoint. The retry logic, for example, uses different append strategies per endpoint, and the comments suggest the fix is incomplete or misapplied — a correctness hazard that decomposition would isolate and fix.
+
+Solution:
+Extract two new functions: `_handle_chat_request` and `_handle_generate_request`, each taking the request, parsed body, upstream URL, and headers, and returning a response. Both should reuse shared logic like `_apply_header_overrides` and `_forward_headers`, but encapsulate their own retry and encoding logic. The retry logic should be parameterized by endpoint-specific rules (e.g., append strategy, max retries) to avoid duplication. The streaming response generator `_stream_ndjson` remains shared.
+
+Benefits:
+Decomposition reduces the function’s length by ~70%, isolates endpoint-specific logic, enables independent unit tests for each handler, and makes bug fixes (like the retry logic) atomic and verifiable. It also improves reviewability — reviewers can focus on one endpoint’s logic at a time — and future maintenance becomes predictable and safer.
+
+VERDICT CONSTRAINT:
+The function snippet IS provided above in this prompt; you do not need to request it or assume it is missing.
+You MUST render exactly one verdict: GENUINE or FALSE POSITIVE.
+Refusals, hedging, or a third outcome (including "Uncertain", "I cannot determine", or any other qualifier) are NOT acceptable. Pick the one verdict that best fits the evidence in the snippet and commit to it.
+
+Genuine
