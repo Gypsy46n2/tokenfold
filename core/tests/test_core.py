@@ -896,3 +896,24 @@ def test_ollama_retry_json_parse_failure_logs_warning():
     finally:
         logger.removeHandler(handler)
         logger.propagate = True
+
+
+# ------------------------------------------------------------ CLI parser
+import pytest  # noqa: E402
+from tokenfold.cli import _build_parser  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "argv, expected_cmd",
+    [
+        (["serve"], "serve"),
+        (["stats"], "stats"),
+        (["bench"], "bench"),
+        (["encode", "hello world"], "encode"),
+        (["dict"], "dict"),
+        (["config", "get"], "config"),
+    ],
+)
+def test_cli_parser_accepts_subcommand(argv, expected_cmd):
+    ns = _build_parser().parse_args(argv)
+    assert ns.cmd == expected_cmd
