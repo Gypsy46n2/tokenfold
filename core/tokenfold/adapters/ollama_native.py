@@ -99,6 +99,13 @@ def add_ollama_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -> N
         r = await client.post(upstream, json=body, headers=headers)
         try:
             obj = r.json()
+        except Exception:
+            logger.warning("Ollama chat JSON parse failure (status %s): %s",
+                           r.status_code, str(r.text)[:500])
+            return JSONResponse(
+                {"error": "upstream returned a non-JSON response"},
+                status_code=502)
+        try:
             msg = obj.get("message") or {}
             raw0 = msg.get("content")
             # Bug (found scanning the repo for more agent-manager blockers, 2026-08-21):
@@ -124,7 +131,11 @@ def add_ollama_routes(app: FastAPI, eng: Engine, client: httpx.AsyncClient) -> N
                     try:
                         obj = r2.json()
                     except Exception:
-                        logger.warning("Ollama retry JSON parse failure: %s", str(r2.text)[:500])
+                        logger.warning("Ollama retry JSON parse failure (status %s): %s",
+                                       r2.status_code, str(r2.text)[:500])
+                        return JSONResponse(
+                            {"error": "upstream returned a non-JSON retry response"},
+                            status_code=502)
             msg = obj.get("message") or {}
             if isinstance(msg.get("content"), str):
                 raw_txt = msg["content"]
