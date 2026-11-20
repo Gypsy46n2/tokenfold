@@ -896,3 +896,67 @@ def test_ollama_retry_json_parse_failure_logs_warning():
     finally:
         logger.removeHandler(handler)
         logger.propagate = True
+
+
+def test_ollama_first_response_non_json_returns_502():
+    """If the first upstream response is not JSON, /api/chat must log a
+    warning and return an explicit 502 error response (no NameError)."""
+    import logging
+    from unittest import mock
+
+    import httpx
+    from fastapi import FastAPI
+
+    from tokenfold.adapters.ollama_native import add_ollama_routes
+    from tokenfold.core.config import Config
+    from tokenfold.core.engine import Engine
+
+    logger = logging.getLogger("tokenfold.adapters.ollama_native")
+    captured = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            captured.append(record)
+
+    handler = _Capture()
+    handler.setLevel(logging.WARNING)
+    logger.addHandler(handler)
+    old_level = logger.level
+    logger.setLevel(logging.WARNING)
+    try:
+        bad_resp = httpx.Response(
+            200,
+            content=b"<html>upstream error</html>",
+            headers={"content-type": "text/html"},
+        )
+
+        async def _fake_post(*args, **kwargs):
+            return bad_resp
+
+        fake_client = mock.AsyncMock()
+        fake_client.post = _fake_post
+
+        eng = Engine(Config())
+        app = FastAPI()
+        add_ollama_routes(app, eng, fake_client)
+        chat_route = next(r for r in app.routes if r.path == "/api/chat")
+
+        fake_request = mock.AsyncMock()
+        fake_request.json = mock.AsyncMock(return_value={
+            "model": "llama3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+        })
+        fake_request.headers = {
+            "x-tokenfold-upstream": "http://localhost:11434/v1",
+        }
+        fake_request.body = mock.AsyncMock(return_value=b"{}")
+
+        resp = _run(chat_route.endpoint(fake_request))
+
+        assert resp.status_code == 502
+        assert any("Ollama chat JSON parse failure" in r.getMessage()
+                   for r in captured)
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
